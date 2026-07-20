@@ -1,0 +1,64 @@
+from typing import Annotated
+from uuid import UUID
+
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.application.services.auth import AuthenticationService
+from app.application.services.sources import SourceService
+from app.core.config import Settings, get_settings
+from app.domain.entities.source import UserAccount
+from app.infrastructure.auth.tokens import decode_access_token
+from app.infrastructure.database.repositories.documents import SqlAlchemyDocumentRepository
+from app.infrastructure.database.repositories.sources import SqlAlchemySourceRepository
+from app.infrastructure.database.repositories.users import SqlAlchemyUserRepository
+from app.infrastructure.database.session import get_session
+from app.plugins.registry import plugin_registry
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+SettingsDep = Annotated[Settings, Depends(get_settings)]
+bearer = HTTPBearer(auto_error=False)
+
+
+def get_auth_service(session: SessionDep, settings: SettingsDep) -> AuthenticationService:
+    return AuthenticationService(SqlAlchemyUserRepository(session), settings)
+
+
+def get_source_service(session: SessionDep) -> SourceService:
+    return SourceService(
+        SqlAlchemySourceRepository(session),
+        SqlAlchemyDocumentRepository(session),
+        plugin_registry,
+    )
+
+
+async def get_current_user(
+    session: SessionDep,
+    settings: SettingsDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> UserAccount:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired access token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        raise unauthorized
+    try:
+        payload = decode_access_token(credentials.credentials, settings)
+        if payload.get("type") != "access":
+            raise unauthorized
+        user_id = UUID(str(payload["sub"]))
+    except (jwt.PyJWTError, KeyError, ValueError) as exc:
+        raise unauthorized from exc
+    user = await SqlAlchemyUserRepository(session).get_by_id(user_id)
+    if user is None or not user.is_active:
+        raise unauthorized
+    return user
+
+
+CurrentUser = Annotated[UserAccount, Depends(get_current_user)]
+AuthServiceDep = Annotated[AuthenticationService, Depends(get_auth_service)]
+SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
