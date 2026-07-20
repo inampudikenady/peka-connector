@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
 
-from app.domain.entities.document import DiscoveredDocument
+from app.domain.entities.document import DiscoveredDocument, DiscoveryBatch
 
 
 class SourcePlugin[ConfigT: BaseModel](ABC):
@@ -23,3 +23,9 @@ class SourcePlugin[ConfigT: BaseModel](ABC):
     @abstractmethod
     def discover(self, config: ConfigT) -> AsyncIterator[DiscoveredDocument]:
         """Yield metadata for discoverable items without extracting content."""
+
+    async def discover_batch(self, config: ConfigT) -> DiscoveryBatch:
+        documents: list[DiscoveredDocument] = []
+        async for item in self.discover(config):
+            documents.append(item)
+        return DiscoveryBatch(tuple(documents))

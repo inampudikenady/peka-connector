@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.domain.entities.document import DiscoveredDocument
+from app.domain.entities.document import DiscoveredDocument, DiscoveryBatch
 from app.domain.ports.plugins import SourcePlugin
 from app.plugins.errors import PluginValidationError
 from app.plugins.filesystem.config import FilesystemSourceConfig
@@ -19,8 +19,14 @@ class FilesystemDocumentSourcePlugin(SourcePlugin[FilesystemSourceConfig]):
     display_name = "Filesystem Document Source"
     config_model = FilesystemSourceConfig
 
+    def __init__(self, sources_root: Path = Path("/data/sources")) -> None:
+        self._sources_root = sources_root
+
     async def validate(self, config: FilesystemSourceConfig) -> None:
-        path = config.path
+        root = await asyncio.to_thread(self._sources_root.resolve)
+        path = await asyncio.to_thread(config.path.resolve)
+        if path != root and root not in path.parents:
+            raise PluginValidationError(f"Path must be inside {root}")
         if not await asyncio.to_thread(path.exists):
             raise PluginValidationError(f"Path does not exist: {path}")
         if not await asyncio.to_thread(path.is_dir):
@@ -29,15 +35,24 @@ class FilesystemDocumentSourcePlugin(SourcePlugin[FilesystemSourceConfig]):
             raise PluginValidationError(f"Path is not readable: {path}")
 
     async def discover(self, config: FilesystemSourceConfig) -> AsyncIterator[DiscoveredDocument]:
+        batch = await self.discover_batch(config)
+        for document in batch.documents:
+            yield document
+
+    async def discover_batch(self, config: FilesystemSourceConfig) -> DiscoveryBatch:
         await self.validate(config)
         root = config.path.resolve()
         paths = await asyncio.to_thread(self._collect_paths, root, config)
+        documents: list[DiscoveredDocument] = []
+        failed_count = 0
         for path in paths:
             try:
                 document = await asyncio.to_thread(self._metadata, root, path)
             except (OSError, PermissionError):
+                failed_count += 1
                 continue
-            yield document
+            documents.append(document)
+        return DiscoveryBatch(tuple(documents), failed_count)
 
     @staticmethod
     def _collect_paths(root: Path, config: FilesystemSourceConfig) -> list[Path]:

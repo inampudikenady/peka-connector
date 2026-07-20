@@ -1,28 +1,26 @@
 # Database
 
-PEKA Connector uses a local SQLite database through SQLAlchemy 2.x. Alembic is the sole schema migration mechanism. Containers run `alembic upgrade head` before the API starts.
+SQLite state is stored at `/data/state/peka.db`, accessed through SQLAlchemy 2.x and migrated only by Alembic. The entrypoint runs `alembic upgrade head` before FastAPI starts. SQLite foreign keys are enabled on every connection.
 
 ## Tables
 
-### `users`
+- `users`: local identity, Argon2 hash, role, enabled state, timestamps, last login.
+- `refresh_tokens`: hashes of opaque refresh and CSRF tokens, expiry and revocation state. Raw tokens are never stored.
+- `sources`: plugin identity, UI-managed JSON configuration, enabled state, health, last success/error/scan, file count.
+- `documents`: source-relative metadata, SHA-256, discovery and last-seen timestamps, active/missing state.
+- `scan_history`: status, timestamps, discovered/added/changed/unchanged/missing/failed counts, sanitized error.
+- `audit_events`: security and operational actions with actor and safe structured details.
+- `application_logs`: structured searchable logs with level, component, message, and sanitized context.
+- `product_settings`: the single UI-managed General and SaaS status record.
 
-Stores UUID, unique username, Argon2 password hash, active flag, and creation time. Plaintext passwords and JWTs are never stored.
+Document content, passwords, raw refresh tokens, JWT secrets, and SaaS API tokens are not stored in these tables.
 
-### `sources`
+## Transactions
 
-Stores UUID, stable plugin type, administrator-facing name, enabled flag, normalized JSON configuration, and timestamps. JSON keeps the source envelope generic while each plugin retains strict Pydantic validation.
+Discovery and hashing occur outside the SQLite write phase. Reconciliation updates metadata in one transaction. Scan lifecycle and source health are committed explicitly so failures remain observable. The appliance runs one writing backend process.
 
-### `documents`
+## Migration 0002
 
-Stores a source foreign key and discovered metadata: relative path, filename, extension, size, modification time, SHA-256, and discovery time. `(source_id, relative_path)` is unique. Deleting a source cascades to its metadata.
+`20260720_0002` adds roles and user lifecycle fields, refresh sessions, source health, document last-seen/state, scan history, activity, logs, and product settings. Existing users migrate as Administrators to preserve access. Existing document records become active and use discovery time as initial last-seen time.
 
-## Transaction behavior
-
-A successful scan replaces one source's document snapshot in one transaction. Discovery and hashing occur before the transaction begins, avoiding a long SQLite write lock. If discovery fails, existing metadata remains available.
-
-SQLite foreign keys are enabled on every connection. The connector currently assumes one writing backend process. Network filesystems are not supported for the SQLite volume; use a local durable Docker volume or VM disk.
-
-## Backup and migration
-
-Stop the backend or use SQLite's supported online backup mechanism before copying the database. Protect backups as configuration secrets may be present in plugin JSON in future releases. Upgrade procedures must back up the database, pull the new signed image, and let Alembic migrate forward. Downgrades are development aids and are not a substitute for restore testing.
-
+Back up `/data/state/peka.db` with SQLite-safe procedures before upgrades. Do not place the database on an unsupported network filesystem.

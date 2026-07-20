@@ -1,88 +1,97 @@
 # PEKA Connector
 
-PEKA Connector is an enterprise on-premises service that discovers customer-approved data inside a customer environment and communicates outbound to the PEKA SaaS platform. The initial release runs with Docker Compose and includes a local administration UI, local authentication, SQLite state, and a filesystem document source.
+PEKA Connector is a single-container enterprise appliance installed inside a customer environment. It provides a local administration UI, inventories explicitly mounted sources, stores local operational state, and is designed for outbound-only HTTPS communication with PEKA SaaS.
 
-The connector does **not** perform OCR, content parsing, chunking, embedding generation, AI inference, or vector indexing. Those remain SaaS responsibilities.
+It does **not** perform OCR, parsing, chunking, embeddings, AI inference, or vector indexing. Those remain PEKA SaaS responsibilities.
 
-## Current capabilities
+## Foundation capabilities
 
-- FastAPI API with JWT bearer authentication and Argon2 password hashing
-- React/TypeScript/Material UI administration interface, compiled into the appliance image
-- Versioned SQLite schema managed by Alembic
-- Typed plugin contract and trusted in-process plugin registry
-- Filesystem source configuration, validation, metadata discovery, and SHA-256 hashing
-- Single non-root appliance container, read-only document mount, health checks, and CI checks
+- FastAPI API and compiled React/TypeScript/Material UI served from one container on port 8080
+- browser-based first-run administrator creation, Argon2 password hashing, JWT access tokens, rotating cookie refresh sessions, and CSRF protection
+- Administrator and Read Only roles with enforced API authorization
+- UI-managed users, connector settings, sources, activity, logs, and diagnostics
+- typed trusted-plugin framework with Filesystem Documents as the only exposed source type
+- isolated read-only `/data/sources` source tree supporting multiple configured subdirectories
+- metadata reconciliation, SHA-256 hashing, scan metrics/history, missing-file state, and source health
+- SQLite/Alembic state, structured logs, audit events, sanitized diagnostics bundles
+- non-root runtime, read-only root filesystem, `no-new-privileges`, and bounded no-exec tmpfs
 
-## Repository layout
+## Production data layout
 
 ```text
-backend/
-  app/
-    api/              HTTP delivery and schemas
-    application/      use cases and orchestration
-    core/             settings and logging
-    domain/           entities and ports
-    infrastructure/   SQLAlchemy, SQLite, Argon2, JWT
-    plugins/          plugin registry and implementations
-  alembic/            database migrations
-  tests/              unit and integration tests
-frontend/             React administration UI
-Dockerfile            multi-stage production appliance build
-docs/                 architecture, security, database, plugin, and ADR docs
-scripts/              local development helpers
-.github/workflows/    continuous integration
+/data/
+  state/       SQLite database (`peka.db`)
+  config/      application-managed configuration material
+  logs/        structured local logs
+  spool/       durable future outbound work
+  sources/     read-only customer source mount
 ```
 
-## Run with Docker Compose
+Only `/data` is persistent. The database is `/data/state/peka.db`. Customer content is mounted read-only at `/data/sources`; source paths configured in the UI must be that directory or a descendant such as `/data/sources/manuals` or `/data/sources/contracts`.
 
-Requirements: Docker Engine with Compose v2 and a local directory containing documents to expose read-only.
+## Install
 
-```sh
-cp .env.example .env
-./scripts/generate-secret.sh
-```
+1. Create a host source directory:
 
-Put the generated value in `PEKA_JWT_SECRET`, set a strong bootstrap password, set `PEKA_DOCUMENTS_PATH`, then start the connector:
+   ```sh
+   mkdir -p sources
+   ```
 
-```sh
-docker compose up --build -d
-```
+2. Copy `.env.example` to `.env`, generate a unique JWT secret with `./scripts/generate-secret.sh`, and optionally set `PEKA_SOURCES_PATH` to the host source directory. Leave bootstrap administrator fields blank for interactive setup.
 
-Open `http://localhost:8080` and sign in with the configured bootstrap administrator. In a container deployment, configure filesystem sources using paths beneath `/documents`.
+3. Start the single connector service:
 
-The production build is a single image. Its stages compile the React application, install the Python backend, and copy both into one minimal Python runtime. FastAPI serves `/api/*` and the compiled SPA from port 8080. SQLite is stored at `/data/peka.db`; `/documents` is mounted read-only by Compose. Only port 8080 is exposed.
+   ```sh
+   docker compose up --build -d
+   ```
 
-The bootstrap password is used only when the user table is empty. Remove it from the runtime environment after the first successful start where operational tooling permits it. Back up the `peka-data` Docker volume as part of the customer's normal backup policy.
+4. Open `http://localhost:8080` (or the configured `PEKA_HTTP_PORT`).
 
-## Local development
+5. Create the first local administrator in the browser.
 
-Backend (Python 3.13):
+6. Configure one or more Filesystem Documents sources from the Sources page using paths beneath `/data/sources`.
+
+After startup, customer configuration is managed through the UI. Customers do not edit Compose, YAML, JSON, or SQLite for normal connector operation. Environment values are limited to deployment bootstrap concerns: published HTTP port, JWT signing secret, optional unattended administrator, source host mount, and initial log level.
+
+## Optional unattended first run
+
+Set both `PEKA_BOOTSTRAP_ADMIN_USERNAME` and `PEKA_BOOTSTRAP_ADMIN_PASSWORD` before the first start. The account is created only while the user table is empty. Remove these values after provisioning. Interactive browser setup is the default and never creates a silent default account.
+
+## Development
+
+Backend requires Python 3.13:
 
 ```sh
 python3.13 -m venv .venv
 . .venv/bin/activate
 pip install -e './backend[dev]'
-cp .env.example .env
 cd backend
 alembic upgrade head
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-Frontend (Node.js 22):
+Frontend requires Node.js 22:
 
 ```sh
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-During development, Vite serves the UI on port 5173 and proxies `/api` to FastAPI on port 8000. This two-process workflow is development-only and does not change the single-container production artifact.
+Vite serves port 5173 and proxies `/api` to development Uvicorn on port 8000. Production remains one image and one process.
 
-Run checks with `pytest backend`, `ruff check backend`, `mypy backend/app`, and `npm run build` from `frontend/`.
+## Verification
 
-## Documentation
+```sh
+.venv/bin/ruff check backend
+.venv/bin/mypy backend/app
+.venv/bin/pytest backend
+cd frontend && npm run lint && npm run test && npm run build
+docker compose config
+docker compose build
+```
 
-Start with [architecture](docs/architecture.md), [plugin development](docs/plugins.md), [database design](docs/database.md), [security](docs/security.md), and the [roadmap](docs/roadmap.md). Architectural decisions are recorded under [docs/adr](docs/adr/).
+See [architecture](docs/architecture.md), [database](docs/database.md), [plugins](docs/plugins.md), [security](docs/security.md), [roadmap](docs/roadmap.md), and [ADRs](docs/adr/).
 
 ## License
 

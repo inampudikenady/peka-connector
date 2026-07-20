@@ -1,57 +1,45 @@
 # Architecture
 
-## Context
+## Appliance boundary
 
-PEKA Connector runs inside a customer's trust boundary. Administrators use its local web interface, and connector integrations read explicitly configured local systems. Future SaaS communication is outbound-only over HTTPS. The connector is a transport and discovery product, not an inference or indexing service.
-
-## Runtime components
+PEKA Connector is one deployable image and one product service. A Node build stage compiles React, a Python build stage resolves backend dependencies, and the runtime contains FastAPI, migrations, and static UI assets. FastAPI serves both `/api/*` and the SPA on port 8080.
 
 ```text
 Administrator browser
         |
-        | HTTP(S) inside customer network
         v
-Single PEKA Connector container (port 8080)
-  FastAPI ---- / ----> compiled React assets
-      |
-      +---- /api ----> Application services
-                           |              |
-                           v              v
-                    Plugin registry   Repository ports
-                           |              |
-                    Source plugin     SQLAlchemy/SQLite
-                           |
-                    /documents (read-only)
-                                      |
-                              /data/peka.db (persistent)
-
-Future: application services ---- outbound HTTPS ----> PEKA SaaS
+PEKA Connector container :8080
+  FastAPI delivery layer ---- compiled React SPA
+        |
+  application services
+        |              |
+  plugin ports     repository ports
+        |              |
+  Filesystem       SQLAlchemy / SQLite
+        |              |
+/data/sources:ro   /data/state/peka.db
 ```
 
-Production uses one appliance container and exposes only port 8080. A multi-stage build compiles React with Node.js, installs the Python package in a Python builder, and copies both outputs into a non-root Python runtime. FastAPI handles `/api` routes first and serves the compiled SPA for all remaining browser routes. SQLite and discovered metadata live under `/data` on a persistent volume; customer documents are mounted at `/documents` read-only.
-
-Logical source separation remains under `backend/` and `frontend/`. Local development may run Uvicorn on port 8000 and Vite on port 5173 with Vite's API proxy. These development processes are not separate production services.
+There is no production Nginx, Redis, PostgreSQL, separate frontend, or separate worker service.
 
 ## Backend boundaries
 
-- **Domain** contains immutable business entities plus repository and plugin interfaces. It has no FastAPI or SQLAlchemy dependency.
-- **Application** contains use cases such as authentication, source lifecycle management, and scans. It coordinates domain ports and defines use-case errors.
-- **Infrastructure** implements persistence and cryptography with SQLAlchemy, SQLite, Argon2, and JWT.
-- **Plugins** contains a small registry and source implementations. Plugins implement the domain `SourcePlugin` contract.
-- **API** validates HTTP input, applies authentication, calls application services, and converts known errors to HTTP responses.
+- **Domain:** immutable entities plus repository and plugin contracts.
+- **Application:** authentication, user, source, scan, and SaaS boundary use cases.
+- **Infrastructure:** SQLAlchemy/SQLite repositories, Argon2, JWT, refresh sessions, structured logging.
+- **Plugins:** explicitly registered trusted source implementations.
+- **API:** Pydantic validation, authorization dependencies, cookies, HTTP error mapping, and response schemas.
 
-Dependencies point inward: delivery and infrastructure depend on application/domain abstractions. Pydantic is permitted in the plugin configuration port because configuration validation and JSON Schema generation are intentional shared requirements.
+Normal configuration is persisted by application services and changed through authenticated APIs. Environment variables configure only deployment bootstrap concerns.
 
-## Request flows
+## Authentication flow
 
-Creating a source validates the HTTP shape, resolves the trusted plugin, validates its typed configuration and external connectivity, then stores the normalized configuration. Scanning reloads that configuration, invokes discovery, and atomically replaces the source's metadata snapshot. A failed scan leaves the previous snapshot intact.
+If no user exists, the unauthenticated setup-status endpoint directs the SPA to first-run setup. The one-time bootstrap endpoint creates an Argon2-hashed Administrator and becomes unavailable. Login returns a short-lived JWT kept in browser memory and sets a rotating opaque refresh token in an HTTP-only SameSite cookie. A separate CSRF cookie/header pair protects refresh and logout. Refresh tokens are hashed in SQLite and revoked on rotation, logout, password changes, reset, or user disablement.
 
-The initial UI starts scans manually. The scan interval is persisted now so a later APScheduler worker can schedule the same application use case without changing plugin contracts.
+## Source and scan flow
 
-## Scalability boundaries
+Each source stores a stable plugin type, typed normalized configuration, enabled state, and operational health. Filesystem paths resolve within `/data/sources`; traversal and symlink escapes are rejected. A scan inventories metadata only, reconciles it with the prior snapshot, marks unseen records missing, and persists counts and history. The initial UI exposes only the implemented filesystem plugin.
 
-SQLite is appropriate for one connector process and modest local metadata. A single backend replica owns writes. Background work will be bounded and scheduled locally. If future scale requires multiple processes or large metadata volumes, the repository port allows a different local persistence adapter without changing plugins or HTTP contracts.
+## Operational data
 
-## Deliberate omissions
-
-SaaS registration, heartbeats, background scheduling, diagnostics bundles, and remote plugin implementations belong to later milestones. The layout reserves clean extension points but does not include placeholder classes with no behavior.
+Audit events and application logs are structured and persisted locally. Overview, activity, logs, and diagnostics report real state or explicit unavailable/empty states. The SaaS registration boundary deliberately returns unavailable until a real PEKA API is supplied.

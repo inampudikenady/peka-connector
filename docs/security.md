@@ -1,30 +1,28 @@
 # Security
 
-## Trust boundaries
+## Runtime
 
-The connector runs inside the customer environment. The local UI should be reachable only from an administrative network. Customer source mounts are read-only. Future PEKA SaaS traffic originates from the backend over HTTPS; the SaaS platform never requires an inbound connection to the connector.
+- one non-root `peka` process
+- read-only root filesystem and `no-new-privileges`
+- persistent writes only under `/data/state`, `/data/config`, `/data/logs`, and `/data/spool`
+- `/data/sources` mounted read-only
+- bounded `/tmp` tmpfs with `noexec` and `nosuid`
+- only port 8080 published; TLS terminates at the customer ingress where required
 
-## Local authentication
+## Identity and sessions
 
-Passwords are hashed with pwdlib's recommended Argon2 settings. Successful login issues a short-lived signed JWT containing an opaque user UUID, token type, issued-at time, and expiry. Every protected request verifies the signature, allowed algorithm, expiry, token type, and active local user.
+The first administrator is created interactively unless explicit unattended credentials are supplied. The endpoint is permanently closed after any user exists. Usernames and strong passwords are validated. Argon2 hashes protect passwords.
 
-The JWT secret must be at least 32 characters and unique per installation. The bootstrap password is required only to create the first account and should be removed from deployment configuration afterward. Production password rotation and additional-user management are roadmap items.
+Access JWTs are short-lived and held only in browser memory. Long-lived refresh tokens are opaque, rotated, stored only as SHA-256 hashes, and delivered in HTTP-only SameSite cookies. The Secure attribute is applied for HTTPS or explicit secure-cookie deployments. Double-submit CSRF protection covers refresh and logout. Login and setup have single-process sliding-window rate limits.
 
-The web UI keeps the access token in session storage, limiting persistence to one browser tab session. This does not eliminate XSS risk; the UI avoids raw HTML injection, uses a restrictive dependency set, and should receive a Content Security Policy before general availability.
+Administrator and Read Only policies are enforced by API dependencies, never only by navigation visibility. Last-active-administrator safeguards prevent lockout. Password changes, resets, disables, and logout revoke refresh sessions.
 
-## Container posture
+## Source isolation
 
-The appliance runs one non-root FastAPI process with `no-new-privileges` and a read-only root filesystem. Only port 8080 is published. `/data` is the only persistent writable volume, `/tmp` is a bounded no-exec tmpfs, and `/documents` is a read-only customer mount. FastAPI serves both the API and compiled UI, eliminating an internal reverse-proxy service. Deploy TLS at the customer ingress or reverse proxy; plain HTTP is suitable only on a trusted local development host.
+Filesystem configuration cannot escape `/data/sources`, including through `..` resolution or a configured symlink. Discovery does not follow file symlinks. The UI has no host mount editor, file browser, shell, or raw SQL capability.
 
-## Filesystem handling
+## Browser and diagnostics
 
-Filesystem configuration requires an absolute path. Discovery does not follow symlinks and produces only normalized relative paths. The configured mount determines the maximum readable scope, so operators should mount the narrowest possible directories. SHA-256 requires reading file bytes but content is neither parsed nor persisted.
+Responses set CSP, frame denial, MIME sniffing prevention, referrer, and permissions headers. Operational contexts pass through secret-key and text redaction. Diagnostics bundles use a positive safe-data selection and exclude hashes, JWT secrets, raw tokens, API tokens, and document contents.
 
-## Future controls
-
-- HTTPS certificate validation and optional outbound proxy configuration
-- connector identity and credential rotation for PEKA SaaS
-- encrypted secret storage for plugin credentials
-- audit events, rate limiting, session revocation, and password rotation
-- signed release images, SBOMs, vulnerability scanning, and provenance
-- diagnostics redaction and configurable retention
+The current in-memory rate limiter is appropriate for the single-process appliance. A future multi-process architecture would require a shared limiter, but no such architecture is planned at this stage.

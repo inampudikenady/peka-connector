@@ -8,10 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.auth import AuthenticationService
 from app.application.services.sources import SourceService
+from app.application.services.users import UserService
 from app.core.config import Settings, get_settings
 from app.domain.entities.source import UserAccount
 from app.infrastructure.auth.tokens import decode_access_token
 from app.infrastructure.database.repositories.documents import SqlAlchemyDocumentRepository
+from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
+from app.infrastructure.database.repositories.scans import SqlAlchemyScanRepository
+from app.infrastructure.database.repositories.sessions import SqlAlchemyRefreshTokenRepository
 from app.infrastructure.database.repositories.sources import SqlAlchemySourceRepository
 from app.infrastructure.database.repositories.users import SqlAlchemyUserRepository
 from app.infrastructure.database.session import get_session
@@ -23,15 +27,28 @@ bearer = HTTPBearer(auto_error=False)
 
 
 def get_auth_service(session: SessionDep, settings: SettingsDep) -> AuthenticationService:
-    return AuthenticationService(SqlAlchemyUserRepository(session), settings)
+    return AuthenticationService(
+        SqlAlchemyUserRepository(session),
+        SqlAlchemyRefreshTokenRepository(session),
+        settings,
+    )
 
 
 def get_source_service(session: SessionDep) -> SourceService:
     return SourceService(
         SqlAlchemySourceRepository(session),
         SqlAlchemyDocumentRepository(session),
+        SqlAlchemyScanRepository(session),
         plugin_registry,
     )
+
+
+def get_user_service(session: SessionDep) -> UserService:
+    return UserService(SqlAlchemyUserRepository(session), SqlAlchemyRefreshTokenRepository(session))
+
+
+def get_operations_repository(session: SessionDep) -> SqlAlchemyOperationsRepository:
+    return SqlAlchemyOperationsRepository(session)
 
 
 async def get_current_user(
@@ -60,5 +77,19 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[UserAccount, Depends(get_current_user)]
+
+
+async def require_administrator(user: CurrentUser) -> UserAccount:
+    if user.role != "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator role required",
+        )
+    return user
+
+
+Administrator = Annotated[UserAccount, Depends(require_administrator)]
 AuthServiceDep = Annotated[AuthenticationService, Depends(get_auth_service)]
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
+UserServiceDep = Annotated[UserService, Depends(get_user_service)]
+OperationsDep = Annotated[SqlAlchemyOperationsRepository, Depends(get_operations_repository)]

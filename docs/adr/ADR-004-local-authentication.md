@@ -9,9 +9,8 @@ Administrators need access when SaaS connectivity is unavailable, and customer e
 
 ## Decision
 
-Use local users with Argon2 password hashes and short-lived HMAC-signed JWT bearer tokens. Create the first administrator from deployment secrets only when the database contains no users. Validate the active user on every authenticated request.
+Use local users with Argon2 password hashes, short-lived HMAC-signed JWT access tokens, and rotating opaque refresh tokens. Interactive browser setup creates the first Administrator and closes permanently after any user exists. Optional environment bootstrap is allowed only for unattended first deployment. Store refresh tokens only as hashes and deliver them through HTTP-only SameSite cookies with CSRF binding. Validate the active user on every authenticated request.
 
 ## Consequences
 
-The first deployment is self-contained and works offline. Customers must protect bootstrap and JWT secrets. Account administration, recovery, MFA, external identity, rate limiting, and token revocation remain required hardening work before broader enterprise rollout.
-
+The first deployment is self-contained and works offline. Customers must protect unattended bootstrap and JWT secrets. Password changes, resets, user disablement, rotation, and logout revoke refresh sessions. Recovery, MFA, and external identity remain future work.

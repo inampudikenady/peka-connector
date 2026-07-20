@@ -9,6 +9,7 @@ from app.infrastructure.database.base import Base
 
 if TYPE_CHECKING:
     from app.infrastructure.database.models.document import DocumentModel
+    from app.infrastructure.database.models.scan import ScanHistoryModel
 
 
 class SourceModel(Base):
@@ -23,6 +24,14 @@ class SourceModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
+    health_status: Mapped[str] = mapped_column(String(32), default="unknown")
+    last_success_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_error: Mapped[str | None] = mapped_column(String(2000), default=None)
+    last_scan_at: Mapped[datetime | None] = mapped_column(default=None)
+    file_count: Mapped[int] = mapped_column(default=0)
     documents: Mapped[list["DocumentModel"]] = relationship(
+        back_populates="source", cascade="all, delete-orphan", passive_deletes=True
+    )
+    scans: Mapped[list["ScanHistoryModel"]] = relationship(
         back_populates="source", cascade="all, delete-orphan", passive_deletes=True
     )

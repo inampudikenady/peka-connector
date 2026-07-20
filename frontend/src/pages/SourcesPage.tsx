@@ -1,126 +1,21 @@
-import AddIcon from '@mui/icons-material/Add';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
-import FolderOpenIcon from '@mui/icons-material/FolderOpen';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import {
-  Alert,
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  IconButton,
-  Paper,
-  Stack,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Tooltip,
-  Typography,
-} from '@mui/material';
+import AddIcon from '@mui/icons-material/Add'; import DeleteIcon from '@mui/icons-material/DeleteOutline'; import EditIcon from '@mui/icons-material/EditOutlined'; import HistoryIcon from '@mui/icons-material/History'; import PlayIcon from '@mui/icons-material/PlayArrow'; import VerifiedIcon from '@mui/icons-material/VerifiedOutlined';
+import { Alert, Button, Chip, Dialog, DialogContent, DialogTitle, IconButton, Paper, Stack, Switch, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip, Typography } from '@mui/material';
 import { useCallback, useEffect, useState } from 'react';
-
-import { api } from '../api/client';
-import type { Source } from '../api/types';
-import { SourceDialog } from '../components/SourceDialog';
-
-export function SourcesPage() {
-  const [sources, setSources] = useState<Source[]>([]);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState('');
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-
-  const load = useCallback(async () => {
-    try {
-      setSources(await api.listSources());
-      setError('');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to load sources');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const scan = async (source: Source) => {
-    setBusyId(source.id);
-    setMessage('');
-    setError('');
-    try {
-      const result = await api.scanSource(source.id);
-      setMessage(`${source.name}: discovered ${result.discovered_count} document(s).`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Scan failed');
-    } finally {
-      setBusyId('');
-    }
-  };
-
-  const remove = async (source: Source) => {
-    if (!window.confirm(`Delete source “${source.name}” and its discovered metadata?`)) return;
-    setBusyId(source.id);
-    try {
-      await api.deleteSource(source.id);
-      await load();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Delete failed');
-    } finally {
-      setBusyId('');
-    }
-  };
-
-  return (
-    <Stack spacing={3}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Box>
-          <Typography variant="h4" fontWeight={700}>Document sources</Typography>
-          <Typography color="text.secondary">Discover document metadata from local filesystems.</Typography>
-        </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setDialogOpen(true)}>Add source</Button>
-      </Box>
-      {message && <Alert severity="success" onClose={() => setMessage('')}>{message}</Alert>}
-      {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
-      <TableContainer component={Paper}>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell>Path</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Interval</TableCell>
-              <TableCell align="right">Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {loading && <TableRow><TableCell colSpan={5} align="center"><CircularProgress size={28} /></TableCell></TableRow>}
-            {!loading && sources.length === 0 && (
-              <TableRow><TableCell colSpan={5} align="center" sx={{ py: 8 }}>
-                <FolderOpenIcon color="disabled" sx={{ fontSize: 44 }} />
-                <Typography color="text.secondary">No sources configured</Typography>
-              </TableCell></TableRow>
-            )}
-            {sources.map((source) => (
-              <TableRow key={source.id} hover>
-                <TableCell><Typography fontWeight={600}>{source.name}</Typography><Typography variant="caption" color="text.secondary">Filesystem documents</Typography></TableCell>
-                <TableCell sx={{ fontFamily: 'monospace' }}>{source.configuration.path}</TableCell>
-                <TableCell><Chip size="small" color={source.enabled ? 'success' : 'default'} label={source.enabled ? 'Enabled' : 'Disabled'} /></TableCell>
-                <TableCell>{source.configuration.scan_interval_seconds}s</TableCell>
-                <TableCell align="right">
-                  <Tooltip title="Scan now"><span><IconButton disabled={busyId === source.id || !source.enabled} onClick={() => void scan(source)}><PlayArrowIcon /></IconButton></span></Tooltip>
-                  <Tooltip title="Delete"><span><IconButton color="error" disabled={busyId === source.id} onClick={() => void remove(source)}><DeleteOutlineIcon /></IconButton></span></Tooltip>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </TableContainer>
-      <SourceDialog open={dialogOpen} onClose={() => setDialogOpen(false)} onCreated={() => void load()} />
-    </Stack>
-  );
+import { api } from '../api/client'; import type { ScanRecord, Source } from '../api/types'; import { useAuth } from '../auth/AuthContext'; import { LoadingState } from '../components/LoadingState'; import { SourceDialog } from '../components/SourceDialog'; import { useToast } from '../components/ToastProvider';
+export function SourcesPage() { const { user } = useAuth(); const admin = user?.role === 'administrator'; const toast = useToast(); const [sources, setSources] = useState<Source[] | null>(null); const [error, setError] = useState(''); const [dialog, setDialog] = useState(false); const [editing, setEditing] = useState<Source | null>(null); const [busy, setBusy] = useState(''); const [history, setHistory] = useState<{ source: Source; scans: ScanRecord[] } | null>(null);
+  const load = useCallback(() => { void api.listSources().then(setSources).catch((e: Error) => setError(e.message)); }, []); useEffect(load, [load]);
+  const scan = async (source: Source) => { setBusy(source.id); try { const result = await api.scanSource(source.id); toast.show(`Scan completed: ${result.discovered_count} discovered, ${result.added_count} added, ${result.changed_count} changed`, 'success'); load(); } catch (e) { toast.show(e instanceof Error ? e.message : 'Scan failed', 'error'); load(); } finally { setBusy(''); } };
+  const validate = async (source: Source) => { setBusy(source.id); try { const result = await api.validateSource(source.id); toast.show(result.message, 'success'); load(); } catch (e) { toast.show(e instanceof Error ? e.message : 'Validation failed', 'error'); load(); } finally { setBusy(''); } };
+  const toggle = async (source: Source) => { try { await api.updateSource(source.id, { name: source.name, enabled: !source.enabled, configuration: source.configuration }); load(); } catch (e) { toast.show(e instanceof Error ? e.message : 'Update failed', 'error'); } };
+  const remove = async (source: Source) => { if (!window.confirm(`Delete source “${source.name}” and its metadata history?`)) return; try { await api.deleteSource(source.id); load(); } catch (e) { toast.show(e instanceof Error ? e.message : 'Delete failed', 'error'); } };
+  const showHistory = async (source: Source) => { try { setHistory({ source, scans: await api.scanHistory(source.id) }); } catch (e) { toast.show(e instanceof Error ? e.message : 'Unable to load history', 'error'); } };
+  if (error) return <Alert severity="error">{error}</Alert>; if (!sources) return <LoadingState label="Loading sources" />;
+  return <Stack spacing={3}><Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between"><div><Typography variant="h4" fontWeight={700}>Sources</Typography><Typography color="text.secondary">Configured connector data sources</Typography></div>{admin && <Button variant="contained" startIcon={<AddIcon />} onClick={() => { setEditing(null); setDialog(true); }}>Add Source</Button>}</Stack>
+    {sources.length === 0 ? <Alert severity="info">No sources are configured. Add a Filesystem Documents source to begin discovery.</Alert> : <TableContainer component={Paper}><Table><TableHead><TableRow><TableCell>Name / Type</TableCell><TableCell>Path</TableCell><TableCell>Enabled</TableCell><TableCell>Health</TableCell><TableCell>Last successful operation</TableCell><TableCell>Files</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>{sources.map((source) => <TableRow key={source.id}><TableCell><Typography fontWeight={600}>{source.name}</Typography><Typography variant="caption" color="text.secondary">Filesystem Documents</Typography></TableCell><TableCell sx={{ fontFamily: 'monospace' }}>{source.configuration.path}</TableCell><TableCell>{admin ? <Switch checked={source.enabled} onChange={() => void toggle(source)} inputProps={{ 'aria-label': `Enable ${source.name}` }} /> : source.enabled ? 'Yes' : 'No'}</TableCell><TableCell><Chip size="small" label={source.health_status} color={source.health_status === 'healthy' ? 'success' : source.health_status === 'unhealthy' ? 'error' : 'default'} />{source.last_error && <Typography variant="caption" color="error" display="block">{source.last_error}</Typography>}</TableCell><TableCell>{source.last_success_at ? new Date(source.last_success_at).toLocaleString() : 'No successful operation'}</TableCell><TableCell>{source.file_count}</TableCell><TableCell align="right">
+      {admin && <><Tooltip title="Validate"><span><IconButton disabled={busy === source.id} onClick={() => void validate(source)}><VerifiedIcon /></IconButton></span></Tooltip><Tooltip title="Scan now"><span><IconButton disabled={busy === source.id || !source.enabled} onClick={() => void scan(source)}><PlayIcon /></IconButton></span></Tooltip><Tooltip title="Edit"><IconButton onClick={() => { setEditing(source); setDialog(true); }}><EditIcon /></IconButton></Tooltip></>}
+      <Tooltip title="Scan history"><IconButton onClick={() => void showHistory(source)}><HistoryIcon /></IconButton></Tooltip>{admin && <Tooltip title="Delete"><IconButton color="error" onClick={() => void remove(source)}><DeleteIcon /></IconButton></Tooltip>}
+    </TableCell></TableRow>)}</TableBody></Table></TableContainer>}
+    <SourceDialog open={dialog} source={editing} onClose={() => setDialog(false)} onSaved={() => { setDialog(false); load(); }} /><HistoryDialog value={history} onClose={() => setHistory(null)} />
+  </Stack>;
 }
-
+function HistoryDialog({ value, onClose }: { value: { source: Source; scans: ScanRecord[] } | null; onClose: () => void }) { return <Dialog open={Boolean(value)} onClose={onClose} fullWidth maxWidth="lg"><DialogTitle>Scan history — {value?.source.name}</DialogTitle><DialogContent>{value?.scans.length === 0 ? <Alert severity="info">No scans have run for this source.</Alert> : <Table size="small"><TableHead><TableRow><TableCell>Started</TableCell><TableCell>Status</TableCell><TableCell>Discovered</TableCell><TableCell>Added</TableCell><TableCell>Changed</TableCell><TableCell>Unchanged</TableCell><TableCell>Missing</TableCell><TableCell>Failed</TableCell></TableRow></TableHead><TableBody>{value?.scans.map((scan) => <TableRow key={scan.id}><TableCell>{new Date(scan.started_at).toLocaleString()}</TableCell><TableCell>{scan.status}</TableCell><TableCell>{scan.discovered_count}</TableCell><TableCell>{scan.added_count}</TableCell><TableCell>{scan.changed_count}</TableCell><TableCell>{scan.unchanged_count}</TableCell><TableCell>{scan.missing_count}</TableCell><TableCell>{scan.failed_count}</TableCell></TableRow>)}</TableBody></Table>}</DialogContent></Dialog>; }

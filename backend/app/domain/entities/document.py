@@ -10,3 +10,12 @@ class DiscoveredDocument:
     size_bytes: int
     modified_at: datetime
     sha256: str
+    discovered_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    state: str = "active"
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryBatch:
+    documents: tuple[DiscoveredDocument, ...]
+    failed_count: int = 0

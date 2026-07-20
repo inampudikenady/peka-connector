@@ -1,41 +1,36 @@
 # Roadmap
 
-## Milestone 1 — Product foundation
+## Completed foundation
 
-- Clean backend boundaries and typed API
-- local Argon2/JWT authentication
-- SQLite/Alembic persistence
-- trusted plugin registry
-- Filesystem Document Source and manual scans
-- Docker Compose deployment and local administration UI
+- single-container FastAPI/React appliance
+- first-run and optional unattended local administrator setup
+- rotating refresh sessions, CSRF, roles, user safeguards, password lifecycle
+- UI-managed General settings and explicit SaaS registration status
+- isolated multi-source filesystem discovery, reconciliation, health, and scan history
+- activity, structured logs, diagnostics, sanitized bundles, and security headers
+- SQLite/Alembic persistence and hardened Docker Compose deployment
 
-## Milestone 2 — Connector lifecycle
+## Next: SaaS lifecycle
 
-- secure SaaS registration and connector identity
-- outbound HTTPS client with retries, timeouts, proxy support, and certificate validation
-- heartbeats and health state
-- configuration and credential rotation
-- structured local logs, audit events, and diagnostics export
+- real registration API contract, connector identity, credential protection and rotation
+- outbound HTTPS client with certificate validation, timeouts, retry/backoff, and proxy support
+- honest heartbeat state and audit events
+- unregister/re-register confirmation flows connected to the real API
 
-## Milestone 3 — Background operation
+## Next: background operation
 
-- APScheduler integration invoking existing application use cases
-- bounded concurrency, cancellation, backoff, and scan state
-- incremental metadata synchronization and tombstones
-- retention policies and operational metrics
+- APScheduler invoking the existing scan use case
+- bounded concurrency, cancellation, backoff, retention, and durable spool processing
+- incremental SaaS metadata transfer and tombstones
 
-## Milestone 4 — Plugin expansion
+## Later source plugins
 
-- plugin SDK/version compatibility policy
-- Prometheus and Loki sources
-- Zammad, ServiceNow, SharePoint, Confluence, and Jira sources
-- secret references and per-plugin connectivity diagnostics
+Prometheus, Loki, Zammad, ServiceNow, SharePoint, Confluence, and Jira will be added only with real contracts, permissions guidance, health checks, secret handling, and tests. They will not appear in the UI before completion.
 
-## Milestone 5 — Enterprise hardening
+## Enterprise hardening
 
-- VM packaging and service management
-- TLS deployment guidance, RBAC, password lifecycle, and recovery workflows
+- TLS and ingress deployment profiles, recovery workflows, optional external identity/MFA
 - signed artifacts, SBOM/provenance, vulnerability response, and upgrade channels
-- performance, failure-injection, migration, backup/restore, and long-running soak tests
+- backup/restore, performance, failure injection, migration, and long-running soak testing
 
-Priorities should follow validated customer deployment requirements. The connector will continue to exclude AI inference, OCR, parsing, chunking, embeddings, vector databases, and indexing.
+OCR, parsing, chunking, embeddings, AI inference, vector databases, and vector indexing remain outside connector scope.

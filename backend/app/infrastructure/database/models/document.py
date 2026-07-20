@@ -26,4 +26,6 @@ class DocumentModel(Base):
     modified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     sha256: Mapped[str] = mapped_column(String(64))
     discovered_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    last_seen_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    state: Mapped[str] = mapped_column(String(32), default="active", index=True)
     source: Mapped["SourceModel"] = relationship(back_populates="documents")

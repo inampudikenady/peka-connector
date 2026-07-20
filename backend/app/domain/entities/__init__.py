@@ -1,4 +1,4 @@
-from app.domain.entities.document import DiscoveredDocument
-from app.domain.entities.source import Source, UserAccount
+from app.domain.entities.document import DiscoveredDocument, DiscoveryBatch
+from app.domain.entities.source import ScanRecord, Source, UserAccount
 
-__all__ = ["DiscoveredDocument", "Source", "UserAccount"]
+__all__ = ["DiscoveredDocument", "DiscoveryBatch", "ScanRecord", "Source", "UserAccount"]

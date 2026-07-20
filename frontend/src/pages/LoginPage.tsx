@@ -1,13 +1,10 @@
 import { Alert, Box, Button, Paper, Stack, TextField, Typography } from '@mui/material';
 import { useState, type FormEvent } from 'react';
 
-import { api } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
 
-interface Props {
-  onLogin: () => void;
-}
-
-export function LoginPage({ onLogin }: Props) {
+export function LoginPage() {
+  const { login } = useAuth();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -18,8 +15,7 @@ export function LoginPage({ onLogin }: Props) {
     setLoading(true);
     setError('');
     try {
-      await api.login(username, password);
-      onLogin();
+      await login(username, password);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Sign-in failed');
     } finally {

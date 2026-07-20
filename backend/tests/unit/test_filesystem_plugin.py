@@ -21,7 +21,7 @@ async def test_discovers_supported_documents_and_metadata(tmp_path) -> None:
         exclude_patterns=["private/**"],
     )
 
-    discovered = [item async for item in FilesystemDocumentSourcePlugin().discover(config)]
+    discovered = [item async for item in FilesystemDocumentSourcePlugin(tmp_path).discover(config)]
 
     assert len(discovered) == 1
     assert discovered[0].relative_path == "guide.txt"
@@ -36,7 +36,35 @@ async def test_rejects_missing_path(tmp_path) -> None:
     config = FilesystemSourceConfig(path=tmp_path / "missing")
 
     with pytest.raises(PluginValidationError, match="does not exist"):
-        await FilesystemDocumentSourcePlugin().validate(config)
+        await FilesystemDocumentSourcePlugin(tmp_path).validate(config)
+
+
+@pytest.mark.asyncio
+async def test_rejects_path_outside_source_root(tmp_path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(PluginValidationError, match="must be inside"):
+        await FilesystemDocumentSourcePlugin(source_root).validate(
+            FilesystemSourceConfig(path=outside)
+        )
+
+
+@pytest.mark.asyncio
+async def test_rejects_symlink_escape(tmp_path) -> None:
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = source_root / "escaped"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(PluginValidationError, match="must be inside"):
+        await FilesystemDocumentSourcePlugin(source_root).validate(
+            FilesystemSourceConfig(path=link)
+        )
 
 
 def test_requires_absolute_path() -> None:

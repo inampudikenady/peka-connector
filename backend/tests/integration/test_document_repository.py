@@ -28,7 +28,7 @@ async def test_replaces_snapshot_after_request_transaction_has_started() -> None
         await session.commit()
         await session.scalar(select(func.count(SourceModel.id)))
 
-        count = await SqlAlchemyDocumentRepository(session).replace_for_source(
+        counts = await SqlAlchemyDocumentRepository(session).reconcile_for_source(
             source.id,
             [
                 DiscoveredDocument(
@@ -42,7 +42,7 @@ async def test_replaces_snapshot_after_request_transaction_has_started() -> None
             ],
         )
 
-        assert count == 1
+        assert counts == {"added": 1, "changed": 0, "unchanged": 0, "missing": 0}
         documents = await SqlAlchemyDocumentRepository(session).list_for_source(source.id)
         assert [document.relative_path for document in documents] == ["guide.md"]
 
