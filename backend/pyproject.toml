@@ -4,14 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "peka-connector"
-version = "0.1.0"
+version = "0.2.0"
 description = "PEKA enterprise on-premises connector"
 requires-python = ">=3.13"
 dependencies = [
   "aiosqlite>=0.20,<1",
   "alembic>=1.14,<2",
+  "apscheduler>=3.11,<4",
+  "cryptography>=44,<47",
   "fastapi>=0.115,<1",
   "greenlet>=3.1,<4",
+  "httpx>=0.28,<1",
   "pydantic-settings>=2.7,<3",
   "pyjwt>=2.10,<3",
   "pwdlib[argon2]>=0.2,<1",
@@ -21,7 +24,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "httpx>=0.28,<1",
   "mypy>=1.14,<2",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.25,<1",

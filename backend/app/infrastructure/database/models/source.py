@@ -29,6 +29,9 @@ class SourceModel(Base):
     last_error: Mapped[str | None] = mapped_column(String(2000), default=None)
     last_scan_at: Mapped[datetime | None] = mapped_column(default=None)
     file_count: Mapped[int] = mapped_column(default=0)
+    next_scheduled_scan_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_scheduled_scan_at: Mapped[datetime | None] = mapped_column(default=None)
+    scan_in_progress: Mapped[bool] = mapped_column(Boolean, default=False)
     documents: Mapped[list["DocumentModel"]] = relationship(
         back_populates="source", cascade="all, delete-orphan", passive_deletes=True
     )

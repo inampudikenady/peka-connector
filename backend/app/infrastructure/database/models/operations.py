@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, ForeignKey, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database.base import Base
@@ -43,11 +43,25 @@ class ProductSettingsModel(Base):
     environment_label: Mapped[str] = mapped_column(String(100), default="Production")
     log_level: Mapped[str] = mapped_column(String(20), default="INFO")
     timezone: Mapped[str] = mapped_column(String(100), default="UTC")
-    saas_status: Mapped[str] = mapped_column(String(32), default="not_registered")
+    saas_status: Mapped[str] = mapped_column(String(32), default="unregistered")
     connector_id: Mapped[str | None] = mapped_column(String(200), default=None)
     tenant_id: Mapped[str | None] = mapped_column(String(200), default=None)
     saas_url: Mapped[str | None] = mapped_column(String(500), default=None)
+    instance_id: Mapped[str | None] = mapped_column(String(36), unique=True, default=None)
+    encrypted_connector_secret: Mapped[str | None] = mapped_column(Text, default=None)
+    encryption_key_check: Mapped[str | None] = mapped_column(Text, default=None)
+    registered_at: Mapped[datetime | None] = mapped_column(default=None)
+    heartbeat_interval_seconds: Mapped[int] = mapped_column(default=300)
+    last_heartbeat_attempt_at: Mapped[datetime | None] = mapped_column(default=None)
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_heartbeat_failed_at: Mapped[datetime | None] = mapped_column(default=None)
+    next_heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_heartbeat_status: Mapped[str | None] = mapped_column(String(32), default=None)
+    last_heartbeat_error: Mapped[str | None] = mapped_column(String(2000), default=None)
+    heartbeat_failure_count: Mapped[int] = mapped_column(default=0)
+    heartbeat_job_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    heartbeat_round_trip_ms: Mapped[float | None] = mapped_column(Float, default=None)
+    last_saas_server_time: Mapped[datetime | None] = mapped_column(default=None)
     updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )

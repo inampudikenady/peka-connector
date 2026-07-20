@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
+from app.core.rate_limit import auth_rate_limiter
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.session import engine
 from app.main import app
@@ -24,6 +25,7 @@ async def _reset_database() -> None:
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     asyncio.run(_reset_database())
+    auth_rate_limiter.reset()
     with TestClient(app) as test_client:
         yield test_client
 
@@ -188,6 +190,7 @@ def test_multiple_sources_manual_scan_metadata_and_history(client: TestClient) -
     first = create("Manuals", manuals)
     create("Contracts", contracts)
     assert len(client.get("/api/v1/sources", headers=headers).json()) == 2
+    assert first["next_scheduled_scan_at"] is not None
     source_id = first["id"]
     scan = client.post(f"/api/v1/sources/{source_id}/scan", headers=headers).json()
     assert scan["added_count"] == 1
@@ -202,7 +205,62 @@ def test_multiple_sources_manual_scan_metadata_and_history(client: TestClient) -
     metadata = client.get(f"/api/v1/sources/{source_id}/documents", headers=headers).json()
     assert metadata[0]["state"] == "missing"
     history = client.get(f"/api/v1/sources/{source_id}/scans", headers=headers).json()
-    assert len(history) == 4
+    assert history["total"] == 4
+    assert {item["trigger"] for item in history["items"]} == {"manual"}
+    detail = client.get(
+        f"/api/v1/sources/{source_id}/scans/{history['items'][0]['id']}", headers=headers
+    )
+    assert detail.status_code == 200
+    assert detail.json()["correlation_id"]
+
+    disabled = client.put(
+        f"/api/v1/sources/{source_id}",
+        headers=headers,
+        json={
+            "name": "Manuals",
+            "enabled": False,
+            "configuration": first["configuration"],
+        },
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["next_scheduled_scan_at"] is None
+
+
+def test_read_only_cannot_mutate_saas_registration(client: TestClient) -> None:
+    _bootstrap(client)
+    admin_headers = _login(client)
+    password = "Viewer!StrongPass123"
+    client.post(
+        "/api/v1/users",
+        headers=admin_headers,
+        json={
+            "username": "registration-reader",
+            "password": password,
+            "confirm_password": password,
+            "role": "read_only",
+        },
+    )
+    reader_headers = _login(client, "registration-reader", password)
+    assert client.get("/api/v1/settings", headers=reader_headers).status_code == 200
+    response = client.post(
+        "/api/v1/settings/saas/register",
+        headers=reader_headers,
+        json={
+            "saas_url": "https://saas.example.test",
+            "registration_token": "must-not-be-accepted",
+            "connector_display_name": "Test Connector",
+        },
+    )
+    assert response.status_code == 403
+    assert (
+        client.post(
+            "/api/v1/settings/saas/test",
+            headers=reader_headers,
+            json={"saas_url": "https://saas.example.test"},
+        ).status_code
+        == 403
+    )
+    assert client.post("/api/v1/settings/saas/retry", headers=reader_headers).status_code == 403
 
 
 def test_diagnostics_bundle_is_sanitized(client: TestClient) -> None:

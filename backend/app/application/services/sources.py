@@ -1,3 +1,4 @@
+from asyncio import Lock
 from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
@@ -15,6 +16,32 @@ class SourceNotFoundError(Exception):
 
 class DisabledSourceError(Exception):
     pass
+
+
+class ScanInProgressError(Exception):
+    pass
+
+
+class SourceScanGuard:
+    """Process-local exclusion shared by manual and scheduled scan entry points."""
+
+    def __init__(self) -> None:
+        self._active: set[UUID] = set()
+        self._lock = Lock()
+
+    async def enter(self, source_id: UUID) -> bool:
+        async with self._lock:
+            if source_id in self._active:
+                return False
+            self._active.add(source_id)
+            return True
+
+    async def leave(self, source_id: UUID) -> None:
+        async with self._lock:
+            self._active.discard(source_id)
+
+
+source_scan_guard = SourceScanGuard()
 
 
 class SourceService:
@@ -90,14 +117,24 @@ class SourceService:
             raise
         return await self._sources.update_operational_status(source.id, "healthy", None)
 
-    async def scan(self, source_id: UUID) -> ScanRecord:
+    async def scan(
+        self,
+        source_id: UUID,
+        trigger: str = "manual",
+        correlation_id: UUID | None = None,
+    ) -> ScanRecord:
         source = await self.get_source(source_id)
         if not source.enabled:
             raise DisabledSourceError("Enable the source before scanning")
-        scan = await self._scans.start(source.id)
-        plugin = self._plugins.get(source.plugin_type)
-        config = plugin.parse_config(source.configuration)
+        if trigger not in {"manual", "scheduled"}:
+            raise ValueError("Unknown scan trigger")
+        if not await source_scan_guard.enter(source_id):
+            raise ScanInProgressError("A scan is already in progress for this source")
         try:
+            await self._sources.set_scan_state(source.id, True, scheduled=trigger == "scheduled")
+            scan = await self._scans.start(source.id, trigger, correlation_id)
+            plugin = self._plugins.get(source.plugin_type)
+            config = plugin.parse_config(source.configuration)
             batch = await plugin.discover_batch(config)
             discovered = list(batch.documents)
             counts = await self._documents.reconcile_for_source(source.id, discovered)
@@ -117,11 +154,15 @@ class SourceService:
             return completed
         except Exception as exc:
             message = str(exc)[:2000] or "Source scan failed"
-            await self._scans.fail(scan.id, message)
+            if "scan" in locals():
+                await self._scans.fail(scan.id, message)
             await self._sources.update_operational_status(source.id, "unhealthy", message)
             if isinstance(exc, PluginError):
                 raise
             raise PluginError(message) from exc
+        finally:
+            await self._sources.set_scan_state(source.id, False)
+            await source_scan_guard.leave(source.id)
 
     async def list_documents(self, source_id: UUID) -> Sequence[DiscoveredDocument]:
         await self.get_source(source_id)
@@ -130,3 +171,16 @@ class SourceService:
     async def list_scan_history(self, source_id: UUID) -> Sequence[ScanRecord]:
         await self.get_source(source_id)
         return await self._scans.list_for_source(source_id)
+
+    async def list_scan_history_page(
+        self, source_id: UUID, page: int, page_size: int
+    ) -> tuple[Sequence[ScanRecord], int]:
+        await self.get_source(source_id)
+        return await self._scans.list_page_for_source(source_id, page, page_size)
+
+    async def get_scan(self, source_id: UUID, scan_id: UUID) -> ScanRecord:
+        await self.get_source(source_id)
+        scan = await self._scans.get(scan_id)
+        if scan is None or scan.source_id != source_id:
+            raise SourceNotFoundError(f"Scan not found: {scan_id}")
+        return scan

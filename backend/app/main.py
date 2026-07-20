@@ -19,9 +19,14 @@ from app.application.services.auth import (
     InvalidRefreshTokenError,
     SetupUnavailableError,
 )
-from app.application.services.saas import SaaSRegistrationUnavailableError
+from app.application.services.saas import (
+    ConfirmationRequiredError,
+    RegistrationStateError,
+    SaaSConfigurationError,
+)
 from app.application.services.sources import (
     DisabledSourceError,
+    ScanInProgressError,
     SourceNotFoundError,
 )
 from app.application.services.users import (
@@ -31,9 +36,17 @@ from app.application.services.users import (
 )
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.core.version import CONNECTOR_VERSION
+from app.domain.ports.saas import SaaSClientError
+from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
 from app.infrastructure.database.repositories.sessions import SqlAlchemyRefreshTokenRepository
 from app.infrastructure.database.repositories.users import SqlAlchemyUserRepository
 from app.infrastructure.database.session import session_factory
+from app.infrastructure.scheduling import HeartbeatInProgressError, connector_scheduler
+from app.infrastructure.security.secrets import (
+    SecretEncryptionService,
+    SecretKeyUnavailableError,
+)
 from app.plugins.errors import PluginError
 from app.plugins.filesystem import FilesystemDocumentSourcePlugin
 from app.plugins.registry import plugin_registry
@@ -66,6 +79,18 @@ class SPAStaticFiles(StaticFiles):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with session_factory() as session:
+        operations = SqlAlchemyOperationsRepository(session)
+        product = await operations.get_settings()
+        encryption = SecretEncryptionService(settings.encryption_key)
+        if settings.environment.lower() != "development" and not encryption.ready:
+            raise SecretKeyUnavailableError("PEKA_ENCRYPTION_KEY is required in production")
+        if encryption.ready:
+            if product.encryption_key_check:
+                encryption.validate_key_check(product.encryption_key_check)
+            else:
+                await operations.set_encryption_key_check(encryption.create_key_check())
+            if product.encrypted_connector_secret:
+                encryption.decrypt(product.encrypted_connector_secret)
         created = await AuthenticationService(
             SqlAlchemyUserRepository(session),
             SqlAlchemyRefreshTokenRepository(session),
@@ -76,12 +101,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 "Created unattended bootstrap administrator '%s'",
                 settings.bootstrap_admin_username,
             )
-    yield
+    await connector_scheduler.start()
+    try:
+        yield
+    finally:
+        await connector_scheduler.shutdown()
 
 
 app = FastAPI(
     title="PEKA Connector API",
-    version="0.1.0",
+    version=CONNECTOR_VERSION,
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
@@ -146,11 +175,34 @@ async def username_conflict(_: Request, exc: UsernameConflictError) -> JSONRespo
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 
-@app.exception_handler(SaaSRegistrationUnavailableError)
-async def saas_unavailable(_: Request, exc: SaaSRegistrationUnavailableError) -> JSONResponse:
+@app.exception_handler(SaaSClientError)
+async def saas_unavailable(_: Request, exc: SaaSClientError) -> JSONResponse:
+    response_status = exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE
+    if response_status >= 500:
+        response_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=response_status, content={"detail": str(exc)})
+
+
+@app.exception_handler(HeartbeatInProgressError)
+async def heartbeat_busy(_: Request, exc: HeartbeatInProgressError) -> JSONResponse:
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
+
+
+@app.exception_handler(SaaSConfigurationError)
+async def saas_configuration(_: Request, exc: SaaSConfigurationError) -> JSONResponse:
     return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": str(exc)}
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)}
     )
+
+
+@app.exception_handler(ConfirmationRequiredError)
+async def confirmation_required(_: Request, exc: ConfirmationRequiredError) -> JSONResponse:
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
+
+
+@app.exception_handler(RegistrationStateError)
+async def registration_state(_: Request, exc: RegistrationStateError) -> JSONResponse:
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 
 @app.exception_handler(SourceNotFoundError)
@@ -160,6 +212,11 @@ async def source_not_found(_: Request, exc: SourceNotFoundError) -> JSONResponse
 
 @app.exception_handler(DisabledSourceError)
 async def disabled_source(_: Request, exc: DisabledSourceError) -> JSONResponse:
+    return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
+
+
+@app.exception_handler(ScanInProgressError)
+async def scan_in_progress(_: Request, exc: ScanInProgressError) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 

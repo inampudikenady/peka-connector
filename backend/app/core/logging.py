@@ -2,8 +2,10 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 SECRET_PATTERN = re.compile(
     r"(?i)(password|secret|token|authorization|cookie)([\"'\s:=]+)([^\s,;}]+)"
@@ -18,12 +20,29 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: "[REDACTED]"
-            if any(term in key.casefold() for term in ("password", "secret", "token"))
+            if any(
+                term in key.casefold()
+                for term in (
+                    "password",
+                    "secret",
+                    "token",
+                    "authorization",
+                    "cookie",
+                    "api_key",
+                )
+            )
             else sanitize(item)
             for key, item in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [sanitize(item) for item in value]
+    if isinstance(value, datetime):
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized.isoformat().replace("+00:00", "Z")
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return sanitize(value.value)
     if isinstance(value, str):
         return redact_text(value)
     return value

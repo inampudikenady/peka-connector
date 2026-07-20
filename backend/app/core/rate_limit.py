@@ -22,5 +22,8 @@ class InMemoryRateLimiter:
             )
         attempts.append(now)
 
+    def reset(self) -> None:
+        self._attempts.clear()
+
 
 auth_rate_limiter = InMemoryRateLimiter()

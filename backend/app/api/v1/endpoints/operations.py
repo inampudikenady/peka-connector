@@ -10,6 +10,8 @@ from app.api.schemas import (
     OverviewResponse,
     PaginatedLogsResponse,
 )
+from app.core.version import CONNECTOR_VERSION
+from app.infrastructure.scheduling import connector_scheduler
 
 router = APIRouter()
 
@@ -28,13 +30,27 @@ async def overview(
         connector_status=data["connector_status"],
         saas_status=data["saas_status"],
         last_heartbeat_at=data["last_heartbeat_at"],
-        connector_version="0.1.0",
+        connector_version=CONNECTOR_VERSION,
         source_count=data["source_count"],
         enabled_source_count=data["enabled_source_count"],
         unhealthy_source_count=data["unhealthy_source_count"],
-        recent_failures=[ActivityResponse.model_validate(item) for item in data["recent_failures"]],
+        recent_events=[ActivityResponse.model_validate(item) for item in data["recent_events"]],
         storage_total_bytes=total,
         storage_free_bytes=free,
+        connector_display_name=data["connector_display_name"],
+        instance_id=data["instance_id"],
+        connector_id=data["connector_id"],
+        tenant_id=data["tenant_id"],
+        next_heartbeat_at=data["next_heartbeat_at"],
+        heartbeat_failure_count=data["heartbeat_failure_count"],
+        saas_url=data["saas_url"],
+        registered_at=data["registered_at"],
+        last_heartbeat_attempt_at=data["last_heartbeat_attempt_at"],
+        heartbeat_interval_seconds=data["heartbeat_interval_seconds"],
+        heartbeat_round_trip_ms=data["heartbeat_round_trip_ms"],
+        scheduler_running=connector_scheduler.running,
+        heartbeat_job_scheduled=connector_scheduler.heartbeat_scheduled,
+        source_scheduler_job_count=connector_scheduler.source_job_count,
     )
 
 

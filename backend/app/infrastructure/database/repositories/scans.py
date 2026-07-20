@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities.source import ScanRecord
@@ -13,8 +13,15 @@ class SqlAlchemyScanRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def start(self, source_id: UUID) -> ScanRecord:
-        model = ScanHistoryModel(source_id=source_id, status="running")
+    async def start(
+        self, source_id: UUID, trigger: str = "manual", correlation_id: UUID | None = None
+    ) -> ScanRecord:
+        model = ScanHistoryModel(
+            source_id=source_id,
+            status="running",
+            trigger=trigger,
+            **({"correlation_id": correlation_id} if correlation_id else {}),
+        )
         self._session.add(model)
         await self._session.commit()
         await self._session.refresh(model)
@@ -55,6 +62,48 @@ class SqlAlchemyScanRepository:
         )
         return [self._to_entity(model) for model in result.all()]
 
+    async def list_page_for_source(
+        self, source_id: UUID, page: int, page_size: int
+    ) -> tuple[Sequence[ScanRecord], int]:
+        total = int(
+            await self._session.scalar(
+                select(func.count(ScanHistoryModel.id)).where(
+                    ScanHistoryModel.source_id == source_id
+                )
+            )
+            or 0
+        )
+        result = await self._session.scalars(
+            select(ScanHistoryModel)
+            .where(ScanHistoryModel.source_id == source_id)
+            .order_by(ScanHistoryModel.started_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        return [self._to_entity(model) for model in result.all()], total
+
+    async def get(self, scan_id: UUID) -> ScanRecord | None:
+        model = await self._session.get(ScanHistoryModel, scan_id)
+        return self._to_entity(model) if model else None
+
+    async def skip(
+        self, source_id: UUID, trigger: str, correlation_id: UUID, reason: str
+    ) -> ScanRecord:
+        now = datetime.now(UTC)
+        model = ScanHistoryModel(
+            source_id=source_id,
+            status="skipped",
+            trigger=trigger,
+            correlation_id=correlation_id,
+            started_at=now,
+            completed_at=now,
+            error=reason[:2000],
+        )
+        self._session.add(model)
+        await self._session.commit()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
     async def _require(self, scan_id: UUID) -> ScanHistoryModel:
         model = await self._session.get(ScanHistoryModel, scan_id)
         if model is None:
@@ -67,6 +116,7 @@ class SqlAlchemyScanRepository:
             id=model.id,
             source_id=model.source_id,
             status=model.status,
+            trigger=model.trigger,
             started_at=model.started_at,
             completed_at=model.completed_at,
             discovered_count=model.discovered_count,
@@ -76,4 +126,5 @@ class SqlAlchemyScanRepository:
             missing_count=model.missing_count,
             failed_count=model.failed_count,
             error=model.error,
+            correlation_id=model.correlation_id,
         )

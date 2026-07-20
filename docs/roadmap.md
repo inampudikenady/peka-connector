@@ -9,19 +9,17 @@
 - isolated multi-source filesystem discovery, reconciliation, health, and scan history
 - activity, structured logs, diagnostics, sanitized bundles, and security headers
 - SQLite/Alembic persistence and hardened Docker Compose deployment
+- automatic interval scans with restart recovery and overlap prevention
+- persistent instance identity and typed registration/heartbeat contracts
+- encrypted connector credential, heartbeat backoff, lifecycle states, and UI controls
+- real SaaS registration/heartbeat contract, Retry Now, connection-state engine, latency/server-time telemetry, and restart recovery
 
-## Next: SaaS lifecycle
+## Next: outbound synchronization
 
-- real registration API contract, connector identity, credential protection and rotation
-- outbound HTTPS client with certificate validation, timeouts, retry/backoff, and proxy support
-- honest heartbeat state and audit events
-- unregister/re-register confirmation flows connected to the real API
-
-## Next: background operation
-
-- APScheduler invoking the existing scan use case
-- bounded concurrency, cancellation, backoff, retention, and durable spool processing
 - incremental SaaS metadata transfer and tombstones
+- durable spool processing, bounded upload concurrency, retention, and recovery
+- connector-secret rotation and remote unregister when SaaS contracts are defined
+- customer proxy configuration and enterprise CA trust workflow
 
 ## Later source plugins
 

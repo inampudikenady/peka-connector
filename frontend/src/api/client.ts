@@ -1,6 +1,6 @@
 import type {
   ActivityEvent, CurrentUser, Diagnostics, LocalUser, LoginResponse, Overview,
-  PaginatedLogs, ProductSettings, ScanRecord, SetupStatus, Source, SourceInput,
+  PaginatedLogs, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
 } from './types';
 
 let accessToken: string | null = null;
@@ -52,9 +52,15 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
       ...init.headers,
     },
   });
-  if (response.status === 401 && retry && await refreshAccessToken()) return request(path, init, false);
+  // Registration endpoints can legitimately relay a SaaS 401 (invalid one-time
+  // token). That must not be mistaken for expiry of the local administrator's
+  // session.
+  const relaysSaasAuthentication = path.startsWith('/settings/saas/');
+  if (response.status === 401 && !relaysSaasAuthentication && retry && await refreshAccessToken()) {
+    return request(path, init, false);
+  }
   if (!response.ok) {
-    if (response.status === 401) unauthorizedHandler?.();
+    if (response.status === 401 && !relaysSaasAuthentication) unauthorizedHandler?.();
     throw await parseError(response);
   }
   if (response.status === 204) return undefined as T;
@@ -100,7 +106,8 @@ export const api = {
   validateSource: (id: string): Promise<{ valid: boolean; message: string }> => request(`/sources/${id}/validate`, { method: 'POST' }),
   deleteSource: (id: string): Promise<void> => request(`/sources/${id}`, { method: 'DELETE' }),
   scanSource: (id: string): Promise<ScanRecord> => request(`/sources/${id}/scan`, { method: 'POST' }),
-  scanHistory: (id: string): Promise<ScanRecord[]> => request(`/sources/${id}/scans`),
+  scanHistory: (id: string, page = 1): Promise<PaginatedScans> => request(`/sources/${id}/scans?page=${page}&page_size=20`),
+  scanDetail: (sourceId: string, scanId: string): Promise<ScanDetail> => request(`/sources/${sourceId}/scans/${scanId}`),
   users: (): Promise<LocalUser[]> => request('/users'),
   createUser: (body: object): Promise<LocalUser> => request('/users', { method: 'POST', body: JSON.stringify(body) }),
   setUserState: (id: string, enabled: boolean): Promise<LocalUser> => request(`/users/${id}/state`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
@@ -108,4 +115,9 @@ export const api = {
   deleteUser: (id: string): Promise<void> => request(`/users/${id}`, { method: 'DELETE' }),
   settings: (): Promise<ProductSettings> => request('/settings'),
   updateSettings: (settings: object): Promise<ProductSettings> => request('/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  testSaas: (saasUrl: string): Promise<{ message: string }> => request('/settings/saas/test', { method: 'POST', body: JSON.stringify({ saas_url: saasUrl }) }),
+  registerSaas: (body: { saas_url: string; registration_token: string; connector_display_name: string; confirmed?: boolean }): Promise<ProductSettings> => request('/settings/saas/register', { method: 'POST', body: JSON.stringify(body) }),
+  reregisterSaas: (body: { saas_url: string; registration_token: string; connector_display_name: string; confirmed: boolean }): Promise<ProductSettings> => request('/settings/saas/reregister', { method: 'POST', body: JSON.stringify(body) }),
+  unregisterSaas: (): Promise<ProductSettings> => request('/settings/saas/unregister', { method: 'POST', body: JSON.stringify({ confirmed: true }) }),
+  retryHeartbeat: (): Promise<ProductSettings> => request('/settings/saas/retry', { method: 'POST' }),
 };

@@ -11,7 +11,7 @@ import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined';
 import {
   AppBar, Box, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon,
-  ListItemText, Menu, MenuItem, Toolbar, Typography, useMediaQuery, useTheme,
+  ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography, useMediaQuery, useTheme,
 } from '@mui/material';
 import { useState, type PropsWithChildren, type ReactNode } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -48,9 +48,9 @@ export function AppShell({ children }: PropsWithChildren) {
   return <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'grey.50' }}>
     <AppBar position="fixed" color="inherit" elevation={0} sx={{ borderBottom: 1, borderColor: 'divider', ml: { md: `${drawerWidth}px` }, width: { md: `calc(100% - ${drawerWidth}px)` } }}>
       <Toolbar>{mobile && <IconButton aria-label="Open navigation" onClick={() => setDrawerOpen(true)}><MenuIcon /></IconButton>}
-        <Box sx={{ flexGrow: 1 }} /><IconButton aria-label="Open profile menu" onClick={(event) => setAnchor(event.currentTarget)}><AccountCircleIcon /></IconButton>
-        <Menu anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)}>
-          <MenuItem disabled>{user?.username}</MenuItem><Divider />
+        <Box sx={{ flexGrow: 1 }} /><Tooltip title="User menu"><IconButton aria-label="User menu" aria-controls={anchor ? 'profile-menu' : undefined} aria-haspopup="true" aria-expanded={Boolean(anchor)} onClick={(event) => setAnchor(event.currentTarget)}><AccountCircleIcon /></IconButton></Tooltip>
+        <Menu id="profile-menu" anchorEl={anchor} open={Boolean(anchor)} onClose={() => setAnchor(null)} MenuListProps={{ 'aria-label': 'User menu' }}>
+          <MenuItem disabled><ListItemText primary={user?.username} secondary={user?.role === 'administrator' ? 'Administrator' : 'Read Only'} /></MenuItem><Divider />
           <MenuItem onClick={() => { setAnchor(null); setPasswordOpen(true); }}>Change Password</MenuItem>
           <MenuItem onClick={() => { setAnchor(null); void logout(); }}>Logout</MenuItem>
         </Menu>

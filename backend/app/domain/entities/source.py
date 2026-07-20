@@ -18,6 +18,9 @@ class Source:
     last_error: str | None
     last_scan_at: datetime | None
     file_count: int
+    next_scheduled_scan_at: datetime | None
+    last_scheduled_scan_at: datetime | None
+    scan_in_progress: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,7 @@ class ScanRecord:
     id: UUID
     source_id: UUID
     status: str
+    trigger: str
     started_at: datetime
     completed_at: datetime | None
     discovered_count: int
@@ -46,3 +50,4 @@ class ScanRecord:
     missing_count: int
     failed_count: int
     error: str | None
+    correlation_id: UUID

@@ -140,6 +140,9 @@ class SourceResponse(BaseModel):
     last_error: str | None
     last_scan_at: datetime | None
     file_count: int
+    next_scheduled_scan_at: datetime | None
+    last_scheduled_scan_at: datetime | None
+    scan_in_progress: bool
 
 
 class SourceValidationResponse(BaseModel):
@@ -176,6 +179,20 @@ class ScanResponse(BaseModel):
     missing_count: int
     failed_count: int
     error: str | None
+    trigger: Literal["manual", "scheduled"]
+    correlation_id: UUID
+
+
+class PaginatedScansResponse(BaseModel):
+    items: list[ScanResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class ScanDetailResponse(ScanResponse):
+    source_name: str
+    log_references: list[str]
 
 
 class ActivityResponse(BaseModel):
@@ -221,6 +238,17 @@ class ProductSettingsResponse(BaseModel):
     tenant_id: str | None
     saas_url: str | None
     last_heartbeat_at: datetime | None
+    instance_id: str
+    registered_at: datetime | None
+    heartbeat_interval_seconds: int
+    last_heartbeat_attempt_at: datetime | None
+    next_heartbeat_at: datetime | None
+    last_heartbeat_status: str | None
+    last_heartbeat_error: str | None
+    heartbeat_failure_count: int
+    last_heartbeat_failed_at: datetime | None
+    heartbeat_round_trip_ms: float | None
+    last_saas_server_time: datetime | None
 
 
 class ProductSettingsUpdate(BaseModel):
@@ -228,7 +256,6 @@ class ProductSettingsUpdate(BaseModel):
     environment_label: str = Field(min_length=1, max_length=100)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"]
     timezone: str = Field(min_length=1, max_length=100)
-    saas_url: str | None = Field(default=None, max_length=500)
 
 
 class OverviewResponse(BaseModel):
@@ -239,9 +266,42 @@ class OverviewResponse(BaseModel):
     source_count: int
     enabled_source_count: int
     unhealthy_source_count: int
-    recent_failures: list[ActivityResponse]
+    recent_events: list[ActivityResponse]
     storage_total_bytes: int | None
     storage_free_bytes: int | None
+    connector_display_name: str
+    instance_id: str
+    connector_id: str | None
+    tenant_id: str | None
+    next_heartbeat_at: datetime | None
+    heartbeat_failure_count: int
+    saas_url: str | None
+    registered_at: datetime | None
+    last_heartbeat_attempt_at: datetime | None
+    heartbeat_interval_seconds: int
+    heartbeat_round_trip_ms: float | None
+    scheduler_running: bool
+    heartbeat_job_scheduled: bool
+    source_scheduler_job_count: int
+
+
+class SaaSConnectivityRequest(BaseModel):
+    saas_url: str = Field(min_length=1, max_length=500)
+
+
+class SaaSRegistrationRequest(BaseModel):
+    saas_url: str = Field(min_length=1, max_length=500)
+    registration_token: str = Field(min_length=20, max_length=512)
+    connector_display_name: str = Field(min_length=1, max_length=255)
+    confirmed: bool = False
+
+
+class ConfirmationRequest(BaseModel):
+    confirmed: bool
+
+
+class ActionResponse(BaseModel):
+    message: str
 
 
 class DiagnosticCheck(BaseModel):
@@ -257,6 +317,19 @@ class DiagnosticsResponse(BaseModel):
     platform: str
     migration_revision: str | None
     checks: list[DiagnosticCheck]
+    instance_id: str
+    registration_state: str
+    connection_state: str
+    saas_hostname: str | None
+    last_heartbeat_attempt_at: datetime | None
+    last_successful_heartbeat_at: datetime | None
+    next_heartbeat_at: datetime | None
+    heartbeat_interval_seconds: int
+    consecutive_failures: int
+    heartbeat_round_trip_ms: float | None
+    scheduler_running: bool
+    heartbeat_job_scheduled: bool
+    source_scheduler_job_count: int
 
 
 class HealthResponse(BaseModel):

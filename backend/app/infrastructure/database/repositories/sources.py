@@ -80,6 +80,32 @@ class SqlAlchemySourceRepository:
         await self._session.refresh(source)
         return self._to_entity(source)
 
+    async def set_scan_state(
+        self,
+        source_id: UUID,
+        in_progress: bool,
+        *,
+        scheduled: bool = False,
+    ) -> Source:
+        source = await self._session.get(SourceModel, source_id)
+        if source is None:
+            raise LookupError(f"Source not found: {source_id}")
+        source.scan_in_progress = in_progress
+        if scheduled and in_progress:
+            source.last_scheduled_scan_at = datetime.now(UTC)
+        await self._session.commit()
+        await self._session.refresh(source)
+        return self._to_entity(source)
+
+    async def set_next_scheduled_scan(self, source_id: UUID, next_at: datetime | None) -> Source:
+        source = await self._session.get(SourceModel, source_id)
+        if source is None:
+            raise LookupError(f"Source not found: {source_id}")
+        source.next_scheduled_scan_at = next_at
+        await self._session.commit()
+        await self._session.refresh(source)
+        return self._to_entity(source)
+
     @staticmethod
     def _to_entity(model: SourceModel) -> Source:
         return Source(
@@ -95,4 +121,7 @@ class SqlAlchemySourceRepository:
             last_error=model.last_error,
             last_scan_at=model.last_scan_at,
             file_count=model.file_count,
+            next_scheduled_scan_at=model.next_scheduled_scan_at,
+            last_scheduled_scan_at=model.last_scheduled_scan_at,
+            scan_in_progress=model.scan_in_progress,
         )

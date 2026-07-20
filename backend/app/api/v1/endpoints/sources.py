@@ -1,16 +1,19 @@
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.dependencies import Administrator, CurrentUser, OperationsDep, SourceServiceDep
 from app.api.schemas import (
     DocumentResponse,
+    PaginatedScansResponse,
+    ScanDetailResponse,
     ScanResponse,
     SourceResponse,
     SourceUpdate,
     SourceValidationResponse,
     SourceWrite,
 )
+from app.infrastructure.scheduling import connector_scheduler
 
 router = APIRouter()
 
@@ -47,7 +50,8 @@ async def create_source(
         details={"plugin_type": source.plugin_type},
         component="sources",
     )
-    return source
+    await connector_scheduler.reconcile_source(source.id)
+    return await service.get_source(source.id)
 
 
 @router.get("/{source_id}", response_model=SourceResponse)
@@ -78,7 +82,8 @@ async def update_source(
         target_id=str(source.id),
         component="sources",
     )
-    return source
+    await connector_scheduler.reconcile_source(source.id)
+    return await service.get_source(source.id)
 
 
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -89,6 +94,7 @@ async def delete_source(
     operations: OperationsDep,
 ) -> Response:
     source = await service.get_source(source_id)
+    await connector_scheduler.remove_source(source_id)
     await service.delete_source(source_id)
     await operations.record_event(
         "source.deleted",
@@ -117,16 +123,18 @@ async def scan_source(
     operations: OperationsDep,
 ) -> object:
     source = await service.get_source(source_id)
+    correlation_id = uuid4()
     await operations.record_event(
         "source.scan_started",
         f"Scan started for {source.name}",
         actor=actor,
         target_type="source",
         target_id=str(source_id),
+        details={"correlation_id": str(correlation_id), "trigger": "manual"},
         component="scanner",
     )
     try:
-        result = await service.scan(source_id)
+        result = await service.scan(source_id, "manual", correlation_id)
     except Exception:
         await operations.record_event(
             "source.scan_failed",
@@ -135,6 +143,7 @@ async def scan_source(
             target_type="source",
             target_id=str(source_id),
             level="ERROR",
+            details={"correlation_id": str(correlation_id), "trigger": "manual"},
             component="scanner",
         )
         raise
@@ -149,6 +158,8 @@ async def scan_source(
             "added": result.added_count,
             "changed": result.changed_count,
             "missing": result.missing_count,
+            "correlation_id": str(result.correlation_id),
+            "trigger": "manual",
         },
         component="scanner",
     )
@@ -160,6 +171,35 @@ async def list_documents(source_id: UUID, _: CurrentUser, service: SourceService
     return await service.list_documents(source_id)
 
 
-@router.get("/{source_id}/scans", response_model=list[ScanResponse])
-async def list_scan_history(source_id: UUID, _: CurrentUser, service: SourceServiceDep) -> object:
-    return await service.list_scan_history(source_id)
+@router.get("/{source_id}/scans", response_model=PaginatedScansResponse)
+async def list_scan_history(
+    source_id: UUID,
+    _: CurrentUser,
+    service: SourceServiceDep,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> PaginatedScansResponse:
+    items, total = await service.list_scan_history_page(source_id, page, page_size)
+    return PaginatedScansResponse(
+        items=[ScanResponse.model_validate(item) for item in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/{source_id}/scans/{scan_id}", response_model=ScanDetailResponse)
+async def get_scan_detail(
+    source_id: UUID,
+    scan_id: UUID,
+    _: CurrentUser,
+    service: SourceServiceDep,
+    operations: OperationsDep,
+) -> ScanDetailResponse:
+    source = await service.get_source(source_id)
+    scan = await service.get_scan(source_id, scan_id)
+    return ScanDetailResponse(
+        **ScanResponse.model_validate(scan).model_dump(),
+        source_name=source.name,
+        log_references=await operations.scan_log_references(str(scan.correlation_id)),
+    )

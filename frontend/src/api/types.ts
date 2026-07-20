@@ -24,6 +24,9 @@ export interface Source {
   last_error: string | null;
   last_scan_at: string | null;
   file_count: number;
+  next_scheduled_scan_at: string | null;
+  last_scheduled_scan_at: string | null;
+  scan_in_progress: boolean;
 }
 
 export interface SourceInput {
@@ -37,7 +40,11 @@ export interface ScanRecord {
   id: string; source_id: string; status: string; started_at: string; completed_at: string | null;
   discovered_count: number; added_count: number; changed_count: number; unchanged_count: number;
   missing_count: number; failed_count: number; error: string | null;
+  trigger: 'manual' | 'scheduled';
+  correlation_id: string;
 }
+export interface PaginatedScans { items: ScanRecord[]; total: number; page: number; page_size: number }
+export interface ScanDetail extends ScanRecord { source_name: string; log_references: string[] }
 
 export interface ActivityEvent {
   id: string; event_type: string; actor_username: string | null; target_type: string | null;
@@ -54,13 +61,23 @@ export interface PaginatedLogs { items: LogEntry[]; total: number; page: number;
 export interface Overview {
   connector_status: string; saas_status: string; last_heartbeat_at: string | null; connector_version: string;
   source_count: number; enabled_source_count: number; unhealthy_source_count: number;
-  recent_failures: ActivityEvent[]; storage_total_bytes: number | null; storage_free_bytes: number | null;
+  recent_events: ActivityEvent[]; storage_total_bytes: number | null; storage_free_bytes: number | null;
+  connector_display_name: string; instance_id: string; connector_id: string | null; tenant_id: string | null;
+  next_heartbeat_at: string | null; heartbeat_failure_count: number;
+  saas_url: string | null; registered_at: string | null; last_heartbeat_attempt_at: string | null;
+  heartbeat_interval_seconds: number; heartbeat_round_trip_ms: number | null;
+  scheduler_running: boolean; heartbeat_job_scheduled: boolean; source_scheduler_job_count: number;
 }
 
 export interface DiagnosticCheck { name: string; status: string; detail: string }
 export interface Diagnostics {
   version: string; build: string; python_version: string; platform: string;
   migration_revision: string | null; checks: DiagnosticCheck[];
+  instance_id: string; registration_state: string; connection_state: string; saas_hostname: string | null;
+  last_heartbeat_attempt_at: string | null; last_successful_heartbeat_at: string | null;
+  next_heartbeat_at: string | null; heartbeat_interval_seconds: number; consecutive_failures: number;
+  heartbeat_round_trip_ms: number | null; scheduler_running: boolean;
+  heartbeat_job_scheduled: boolean; source_scheduler_job_count: number;
 }
 
 export interface LocalUser {
@@ -72,4 +89,10 @@ export interface ProductSettings {
   connector_display_name: string; environment_label: string; log_level: string; timezone: string;
   saas_status: string; connector_id: string | null; tenant_id: string | null;
   saas_url: string | null; last_heartbeat_at: string | null;
+  instance_id: string; registered_at: string | null; heartbeat_interval_seconds: number;
+  last_heartbeat_attempt_at: string | null; next_heartbeat_at: string | null;
+  last_heartbeat_status: string | null; last_heartbeat_error: string | null;
+  heartbeat_failure_count: number;
+  last_heartbeat_failed_at: string | null; heartbeat_round_trip_ms: number | null;
+  last_saas_server_time: string | null;
 }

@@ -75,6 +75,18 @@ class SourceRepository(Protocol):
         success: bool = False,
     ) -> Source: ...
 
+    async def set_scan_state(
+        self,
+        source_id: UUID,
+        in_progress: bool,
+        *,
+        scheduled: bool = False,
+    ) -> Source: ...
+
+    async def set_next_scheduled_scan(
+        self, source_id: UUID, next_at: datetime | None
+    ) -> Source: ...
+
 
 class DocumentRepository(Protocol):
     async def reconcile_for_source(
@@ -85,7 +97,9 @@ class DocumentRepository(Protocol):
 
 
 class ScanRepository(Protocol):
-    async def start(self, source_id: UUID) -> ScanRecord: ...
+    async def start(
+        self, source_id: UUID, trigger: str = "manual", correlation_id: UUID | None = None
+    ) -> ScanRecord: ...
 
     async def complete(
         self, scan_id: UUID, counts: dict[str, int], discovered_count: int
@@ -94,3 +108,13 @@ class ScanRepository(Protocol):
     async def fail(self, scan_id: UUID, error: str) -> ScanRecord: ...
 
     async def list_for_source(self, source_id: UUID, limit: int = 50) -> Sequence[ScanRecord]: ...
+
+    async def list_page_for_source(
+        self, source_id: UUID, page: int, page_size: int
+    ) -> tuple[Sequence[ScanRecord], int]: ...
+
+    async def get(self, scan_id: UUID) -> ScanRecord | None: ...
+
+    async def skip(
+        self, source_id: UUID, trigger: str, correlation_id: UUID, reason: str
+    ) -> ScanRecord: ...

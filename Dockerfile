@@ -29,7 +29,7 @@ ENV PYTHONUNBUFFERED=1 \
     PEKA_BUILD_ID=${PEKA_BUILD_ID}
 
 LABEL org.opencontainers.image.title="PEKA Connector" \
-      org.opencontainers.image.version="0.1.0"
+      org.opencontainers.image.version="0.2.0"
 
 RUN groupadd --gid 10001 peka \
     && useradd --uid 10001 --gid peka --no-create-home peka

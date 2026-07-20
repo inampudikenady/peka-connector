@@ -5,6 +5,7 @@ import platform
 import sys
 import zipfile
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Response
 from sqlalchemy import select, text
@@ -12,7 +13,11 @@ from sqlalchemy import select, text
 from app.api.dependencies import CurrentUser, OperationsDep, SessionDep, SettingsDep
 from app.api.schemas import DiagnosticCheck, DiagnosticsResponse
 from app.core.logging import sanitize
+from app.core.version import CONNECTOR_VERSION
 from app.infrastructure.database.models.source import SourceModel
+from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
+from app.infrastructure.scheduling import connector_scheduler
+from app.infrastructure.security.secrets import SecretEncryptionService
 
 router = APIRouter()
 
@@ -51,12 +56,51 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
             detail=f"{settings.sources_root} is {'readable' if mount_ok else 'not available'}",
         )
     )
+    product = await SqlAlchemyOperationsRepository(session).get_settings()
+    endpoint_hostname = (
+        urlsplit(product.saas_url).hostname if product.saas_url else "not configured"
+    )
+    scheduler_detail = (
+        f"Running: {connector_scheduler.running}; "
+        f"source jobs: {connector_scheduler.source_job_count}"
+    )
+    heartbeat_detail = (
+        f"Scheduled: {connector_scheduler.heartbeat_scheduled}; "
+        f"last success: {product.last_heartbeat_at or 'none'}"
+    )
     checks.append(
         DiagnosticCheck(
             name="PEKA SaaS connectivity",
-            status="unavailable",
-            detail="SaaS registration API is not configured in this release",
+            status="warning"
+            if product.saas_status in {"degraded", "disconnected", "authentication_failed"}
+            else "unavailable"
+            if product.saas_status in {"unregistered", "not_registered"}
+            else "healthy",
+            detail=f"Registration state: {product.saas_status}; endpoint: {endpoint_hostname}",
         )
+    )
+    checks.extend(
+        [
+            DiagnosticCheck(
+                name="Scheduler",
+                status="healthy" if connector_scheduler.running else "unhealthy",
+                detail=scheduler_detail,
+            ),
+            DiagnosticCheck(
+                name="Heartbeat scheduler",
+                status="healthy" if connector_scheduler.heartbeat_scheduled else "unavailable",
+                detail=heartbeat_detail,
+            ),
+            DiagnosticCheck(
+                name="Secret encryption",
+                status="healthy"
+                if SecretEncryptionService(settings.encryption_key).ready
+                else "unhealthy",
+                detail="Deployment encryption key is available"
+                if settings.encryption_key
+                else "Deployment encryption key is unavailable",
+            ),
+        ]
     )
     return checks
 
@@ -65,13 +109,34 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
 async def diagnostics(
     _: CurrentUser, session: SessionDep, settings: SettingsDep
 ) -> DiagnosticsResponse:
+    product = await SqlAlchemyOperationsRepository(session).get_settings()
+    registration_state = (
+        "registering"
+        if product.saas_status == "registering"
+        else "registered"
+        if product.connector_id and product.encrypted_connector_secret
+        else "unregistered"
+    )
     return DiagnosticsResponse(
-        version="0.1.0",
+        version=CONNECTOR_VERSION,
         build=os.getenv("PEKA_BUILD_ID", "development"),
         python_version=platform.python_version(),
         platform=platform.platform(),
         migration_revision=await _migration_revision(session),
         checks=await _checks(session, settings),
+        instance_id=str(product.instance_id),
+        registration_state=registration_state,
+        connection_state=product.saas_status,
+        saas_hostname=urlsplit(product.saas_url).hostname if product.saas_url else None,
+        last_heartbeat_attempt_at=product.last_heartbeat_attempt_at,
+        last_successful_heartbeat_at=product.last_heartbeat_at,
+        next_heartbeat_at=product.next_heartbeat_at,
+        heartbeat_interval_seconds=product.heartbeat_interval_seconds,
+        consecutive_failures=product.heartbeat_failure_count,
+        heartbeat_round_trip_ms=product.heartbeat_round_trip_ms,
+        scheduler_running=connector_scheduler.running,
+        heartbeat_job_scheduled=connector_scheduler.heartbeat_scheduled,
+        source_scheduler_job_count=connector_scheduler.source_job_count,
     )
 
 
@@ -93,6 +158,14 @@ async def diagnostics_bundle(
         "timezone": product_settings.timezone,
         "saas_status": product_settings.saas_status,
         "saas_url": product_settings.saas_url,
+        "instance_id": product_settings.instance_id,
+        "last_heartbeat_at": product_settings.last_heartbeat_at,
+        "heartbeat_failure_count": product_settings.heartbeat_failure_count,
+        "heartbeat_round_trip_ms": product_settings.heartbeat_round_trip_ms,
+        "last_saas_server_time": product_settings.last_saas_server_time,
+        "last_heartbeat_attempt_at": product_settings.last_heartbeat_attempt_at,
+        "last_heartbeat_failed_at": product_settings.last_heartbeat_failed_at,
+        "next_heartbeat_at": product_settings.next_heartbeat_at,
     }
     source_health = [
         {

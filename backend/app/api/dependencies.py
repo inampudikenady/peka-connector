@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.auth import AuthenticationService
+from app.application.services.saas import RegistrationService
 from app.application.services.sources import SourceService
 from app.application.services.users import UserService
 from app.core.config import Settings, get_settings
@@ -19,6 +20,9 @@ from app.infrastructure.database.repositories.sessions import SqlAlchemyRefreshT
 from app.infrastructure.database.repositories.sources import SqlAlchemySourceRepository
 from app.infrastructure.database.repositories.users import SqlAlchemyUserRepository
 from app.infrastructure.database.session import get_session
+from app.infrastructure.saas.client import HttpxPEKASaaSClient
+from app.infrastructure.scheduling import connector_scheduler
+from app.infrastructure.security.secrets import SecretEncryptionService
 from app.plugins.registry import plugin_registry
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -49,6 +53,20 @@ def get_user_service(session: SessionDep) -> UserService:
 
 def get_operations_repository(session: SessionDep) -> SqlAlchemyOperationsRepository:
     return SqlAlchemyOperationsRepository(session)
+
+
+def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
+    return RegistrationService(
+        SqlAlchemyOperationsRepository(session),
+        HttpxPEKASaaSClient(
+            settings.saas_connect_timeout_seconds,
+            settings.saas_read_timeout_seconds,
+            settings.tls_verify,
+        ),
+        SecretEncryptionService(settings.encryption_key),
+        settings,
+        connector_scheduler,
+    )
 
 
 async def get_current_user(
@@ -93,3 +111,4 @@ AuthServiceDep = Annotated[AuthenticationService, Depends(get_auth_service)]
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 OperationsDep = Annotated[SqlAlchemyOperationsRepository, Depends(get_operations_repository)]
+RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

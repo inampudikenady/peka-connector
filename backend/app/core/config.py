@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     data_root: Path = Path("./data")
     sources_root: Path = Path("./sources")
     jwt_secret: SecretStr = Field(min_length=32)
+    encryption_key: SecretStr | None = Field(default=None, min_length=32)
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = Field(default=30, ge=5, le=1440)
     bootstrap_admin_username: str | None = None
@@ -29,6 +30,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
     refresh_token_days: int = Field(default=7, ge=1, le=30)
     cookie_secure: bool = False
+    saas_connect_timeout_seconds: float = Field(default=5.0, ge=1, le=30)
+    saas_read_timeout_seconds: float = Field(default=15.0, ge=1, le=120)
+    tls_verify: bool = True
 
     @field_validator("database_url")
     @classmethod

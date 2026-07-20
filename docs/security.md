@@ -8,6 +8,7 @@
 - `/data/sources` mounted read-only
 - bounded `/tmp` tmpfs with `noexec` and `nosuid`
 - only port 8080 published; TLS terminates at the customer ingress where required
+- outbound SaaS origins require HTTPS outside development and use TLS verification
 
 ## Identity and sessions
 
@@ -26,3 +27,11 @@ Filesystem configuration cannot escape `/data/sources`, including through `..` r
 Responses set CSP, frame denial, MIME sniffing prevention, referrer, and permissions headers. Operational contexts pass through secret-key and text redaction. Diagnostics bundles use a positive safe-data selection and exclude hashes, JWT secrets, raw tokens, API tokens, and document contents.
 
 The current in-memory rate limiter is appropriate for the single-process appliance. A future multi-process architecture would require a shared limiter, but no such architecture is planned at this stage.
+
+## Connector credentials
+
+`PEKA_ENCRYPTION_KEY` is a required production bootstrap secret independent of the JWT key. It is never generated silently, persisted, returned by an API, logged, or included in diagnostics. The application derives an AES-256 key and uses AES-GCM with a random nonce and associated data. SQLite stores only versioned ciphertext and an encrypted validation marker. Startup validates the marker and any stored connector credential; a missing or changed key fails safely before serving traffic. Operators must preserve the key in their deployment secret manager through container replacement and database restore.
+
+The one-time registration token exists only in request memory. The returned connector secret is decrypted only for heartbeat authorization. Client error messages are centrally mapped and sanitized; authorization headers and secret values never enter structured contexts.
+
+Re-registration is transactional from the appliance perspective: existing working credentials remain stored unless a new registration response is fully validated. Registration `401` responses are treated as remote token rejection, not local browser-session expiry. Connectivity testing never submits the one-time token and cannot create a connector.
