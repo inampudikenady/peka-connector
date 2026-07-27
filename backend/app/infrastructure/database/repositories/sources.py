@@ -15,12 +15,18 @@ class SqlAlchemySourceRepository:
         self._session = session
 
     async def list(self) -> Sequence[Source]:
-        result = await self._session.scalars(select(SourceModel).order_by(SourceModel.name))
+        result = await self._session.scalars(
+            select(SourceModel)
+            .where(SourceModel.system_managed.is_(False))
+            .order_by(SourceModel.name)
+        )
         return [self._to_entity(model) for model in result.all()]
 
     async def get(self, source_id: UUID) -> Source | None:
         model = await self._session.get(SourceModel, source_id)
-        return self._to_entity(model) if model else None
+        if model is None or model.system_managed:
+            return None
+        return self._to_entity(model)
 
     async def create(
         self, plugin_type: str, name: str, enabled: bool, configuration: dict[str, Any]

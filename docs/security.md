@@ -5,9 +5,16 @@
 - one non-root `peka` process
 - read-only root filesystem and `no-new-privileges`
 - persistent writes only under `/data/state`, `/data/config`, `/data/logs`, and `/data/spool`
-- `/data/sources` mounted read-only
+- `/data/external-sources` mounted read-only
+- managed `/data/sources/documents` and `/data/sources/cmdb` mounted as isolated,
+  connector-writable named volumes
 - bounded `/tmp` tmpfs with `noexec` and `nosuid`
 - only port 8080 published; TLS terminates at the customer ingress where required
+
+CMDB uploads accept only CSV and XLSX, use generated filenames, enforce size and row limits, and
+never execute formulas, macros, external links, or embedded workbook programs. Prometheus
+credentials use the connector encryption service and are not returned after save. Inventory
+mutation endpoints require the administrator role; authenticated read-only users may view data.
 - outbound SaaS origins require HTTPS outside development and use TLS verification
 
 ## Identity and sessions
@@ -21,6 +28,18 @@ Administrator and Read Only policies are enforced by API dependencies, never onl
 ## Source isolation
 
 Filesystem configuration cannot escape `/data/sources`, including through `..` resolution or a configured symlink. Discovery does not follow file symlinks. The UI has no host mount editor, file browser, shell, or raw SQL capability.
+
+The managed document source is stricter: `/data/sources/documents` is compiled into the
+application boundary and has no writeable path setting. A dedicated Docker volume makes that
+directory writable while the external source bind and container root remain read-only. Upload
+filenames are normalized and stripped of paths; hidden files, traversal, symlinks, unsupported
+types, MIME/signature mismatches, zero-byte files, and detectable encryption are rejected. Uploads
+stream to unpredictable temporary names, enforce byte limits during streaming, fsync, and use
+atomic rename. Files are never executed or extracted.
+
+The source row is marked `system_managed`. Generic source repository operations exclude it, generic filesystem creation is disabled, and the Documents settings schema forbids extra fields such as `path` or patterns. Administrators can change only enabled state and a bounded scan interval. Read Only users can inspect the same operational state without mutation rights.
+
+Only Administrators can upload, retry, or delete. Read Only users can inspect inventory and status. PEKA transfers omit tenant selection, local usernames, arbitrary paths, and document content from logs/activity. Authorization headers, connector credentials, registration tokens, and file bytes pass through neither structured log fields nor diagnostics.
 
 ## Browser and diagnostics
 

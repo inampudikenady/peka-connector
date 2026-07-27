@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -53,6 +54,10 @@ class SourceHeartbeatSummary(BaseModel):
 
 class ConnectorHeartbeatRequest(BaseModel):
     instance_id: UUID
+    name: str = Field(min_length=1, max_length=255, pattern=r"^[^\x00-\x1f]+$")
+    environment: str = Field(
+        min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+\-]*$"
+    )
     connector_version: str = Field(
         min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+\-]*$"
     )
@@ -89,11 +94,42 @@ class ConnectorHeartbeatResponse(BaseModel):
         return value
 
 
+class DocumentDeliveryMetadata(BaseModel):
+    source_id: UUID
+    document_key: str = Field(min_length=1, max_length=2200)
+    relative_path: str = Field(min_length=1, max_length=2048)
+    filename: str = Field(min_length=1, max_length=512)
+    mime_type: str = Field(min_length=1, max_length=200)
+    size_bytes: int = Field(ge=0)
+    content_hash: str | None = Field(pattern=r"^sha256:[0-9a-f]{64}$", default=None)
+    modified_at: datetime | None = None
+    operation: Literal["upsert", "delete"]
+    connector_version: str
+
+
+class DocumentDeliveryResponse(BaseModel):
+    accepted: Literal[True]
+    document_id: str = Field(min_length=1, max_length=200)
+    version_id: str | None = Field(default=None, max_length=200)
+    content_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    ingestion_status: str = Field(min_length=1, max_length=100)
+
+
 class SaaSClientError(Exception):
-    def __init__(self, kind: str, message: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        kind: str,
+        message: str,
+        status_code: int | None = None,
+        *,
+        error_code: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status_code = status_code
+        self.error_code = error_code
+        self.request_id = request_id
 
     @property
     def authentication_failure(self) -> bool:
@@ -104,7 +140,10 @@ class PEKASaaSClient(Protocol):
     async def test_connectivity(self, base_url: str) -> None: ...
 
     async def register_connector(
-        self, base_url: str, request: ConnectorRegistrationRequest
+        self,
+        base_url: str,
+        request: ConnectorRegistrationRequest,
+        correlation_id: str | None = None,
     ) -> ConnectorRegistrationResponse: ...
 
     async def send_heartbeat(
@@ -115,7 +154,15 @@ class PEKASaaSClient(Protocol):
         request: ConnectorHeartbeatRequest,
     ) -> ConnectorHeartbeatResponse: ...
 
-    async def upload_documents(self) -> None: ...
+    async def deliver_document(
+        self,
+        base_url: str,
+        connector_id: UUID,
+        connector_secret: str,
+        metadata: DocumentDeliveryMetadata,
+        idempotency_key: str,
+        file_path: Path | None,
+    ) -> DocumentDeliveryResponse: ...
 
     async def report_source_health(self) -> None: ...
 

@@ -164,6 +164,88 @@ class DocumentResponse(BaseModel):
     state: str
 
 
+class ManagedDocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    source_id: UUID
+    document_key: str
+    relative_path: str
+    filename: str
+    normalized_filename: str
+    extension: str
+    mime_type: str
+    size_bytes: int
+    content_hash: str
+    modified_at: datetime
+    discovered_at: datetime
+    first_seen_at: datetime
+    last_seen_at: datetime
+    local_status: str
+    delivery_status: str
+    upload_attempt_count: int
+    last_upload_attempt_at: datetime | None
+    uploaded_at: datetime | None
+    remote_document_id: str | None
+    remote_version_id: str | None
+    last_error_code: str | None
+    last_error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None
+    entry_method: str
+
+
+class PaginatedManagedDocumentsResponse(BaseModel):
+    items: list[ManagedDocumentResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class DocumentUploadResult(BaseModel):
+    filename: str
+    success: bool
+    document: ManagedDocumentResponse | None = None
+    code: str | None = None
+    message: str
+
+
+class DocumentUploadBatchResponse(BaseModel):
+    results: list[DocumentUploadResult]
+
+
+class ManagedDocumentSourceResponse(BaseModel):
+    id: UUID
+    name: str
+    plugin_type: Literal["filesystem_documents"]
+    path: Literal["/data/sources/documents"]
+    enabled: bool
+    system_managed: Literal[True]
+    scan_interval_seconds: int
+    last_scan_at: datetime | None
+    next_scheduled_scan_at: datetime | None
+    last_scan_result: str
+    discovered_document_count: int
+    health_status: str
+    last_error: str | None
+
+
+class ManagedDocumentSourceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    scan_interval_seconds: int = Field(ge=30, le=86400)
+
+
+class ManagedDocumentScanResponse(BaseModel):
+    discovered: int
+    changed: int
+    unchanged: int
+    removed: int
+    delayed: int
+
+
 class ScanResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -204,8 +286,15 @@ class ActivityResponse(BaseModel):
     target_type: str | None
     target_id: str | None
     message: str
-    details: dict[str, Any]
     created_at: datetime
+    outcome: Literal["success", "warning", "failure", "information"]
+
+
+class PaginatedActivityResponse(BaseModel):
+    items: list[ActivityResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 class LogResponse(BaseModel):
@@ -232,7 +321,6 @@ class ProductSettingsResponse(BaseModel):
     connector_display_name: str
     environment_label: str
     log_level: str
-    timezone: str
     saas_status: str
     connector_id: str | None
     tenant_id: str | None
@@ -249,13 +337,15 @@ class ProductSettingsResponse(BaseModel):
     last_heartbeat_failed_at: datetime | None
     heartbeat_round_trip_ms: float | None
     last_saas_server_time: datetime | None
+    metadata_sync_warning: str | None = None
 
 
 class ProductSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     connector_display_name: str = Field(min_length=1, max_length=200)
     environment_label: str = Field(min_length=1, max_length=100)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"]
-    timezone: str = Field(min_length=1, max_length=100)
 
 
 class OverviewResponse(BaseModel):
@@ -283,6 +373,17 @@ class OverviewResponse(BaseModel):
     scheduler_running: bool
     heartbeat_job_scheduled: bool
     source_scheduler_job_count: int
+    document_total: int
+    document_queued: int
+    document_uploading: int
+    document_uploaded: int
+    document_failed: int
+    document_unsupported: int
+    last_document_delivery_at: datetime | None
+    document_endpoint_status: str
+    document_source_health: str
+    document_source_last_scan_at: datetime | None
+    document_source_next_scan_at: datetime | None
 
 
 class SaaSConnectivityRequest(BaseModel):
@@ -290,9 +391,10 @@ class SaaSConnectivityRequest(BaseModel):
 
 
 class SaaSRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     saas_url: str = Field(min_length=1, max_length=500)
     registration_token: str = Field(min_length=20, max_length=512)
-    connector_display_name: str = Field(min_length=1, max_length=255)
     confirmed: bool = False
 
 
@@ -330,6 +432,10 @@ class DiagnosticsResponse(BaseModel):
     scheduler_running: bool
     heartbeat_job_scheduled: bool
     source_scheduler_job_count: int
+    document_worker_running: bool
+    document_reconciliation_scheduled: bool
+    pending_document_jobs: int
+    stale_document_jobs: int
 
 
 class HealthResponse(BaseModel):

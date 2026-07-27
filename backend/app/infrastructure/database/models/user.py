@@ -5,6 +5,7 @@ from sqlalchemy import Boolean, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base
+from app.infrastructure.database.types import UTCDateTime
 
 
 class UserModel(Base):
@@ -15,11 +16,11 @@ class UserModel(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     role: Mapped[str] = mapped_column(String(32), default="administrator", index=True)
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        UTCDateTime(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     refresh_tokens: Mapped[list["RefreshTokenModel"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -32,7 +33,7 @@ class RefreshTokenModel(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     csrf_hash: Mapped[str] = mapped_column(String(64))
-    expires_at: Mapped[datetime]
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
-    revoked_at: Mapped[datetime | None] = mapped_column(default=None)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     user: Mapped["UserModel"] = relationship(back_populates="refresh_tokens")

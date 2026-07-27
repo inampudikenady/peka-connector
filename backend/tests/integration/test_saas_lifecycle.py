@@ -39,16 +39,26 @@ class FakeScheduler:
 class FakeSaaSClient:
     def __init__(self) -> None:
         self.registration_token: str | None = None
+        self.registration_calls = 0
+        self.registration_correlation_id: str | None = None
         self.secret_received: str | None = None
         self.heartbeat_error: SaaSClientError | None = None
         self.registration_error: SaaSClientError | None = None
+        self.registration_request: ConnectorRegistrationRequest | None = None
+        self.heartbeat_request: ConnectorHeartbeatRequest | None = None
 
     async def test_connectivity(self, base_url: str) -> None:
         return None
 
     async def register_connector(
-        self, base_url: str, request: ConnectorRegistrationRequest
+        self,
+        base_url: str,
+        request: ConnectorRegistrationRequest,
+        correlation_id: str | None = None,
     ) -> ConnectorRegistrationResponse:
+        self.registration_calls += 1
+        self.registration_request = request
+        self.registration_correlation_id = correlation_id
         self.registration_token = request.registration_token
         if self.registration_error:
             raise self.registration_error
@@ -68,6 +78,7 @@ class FakeSaaSClient:
         request: ConnectorHeartbeatRequest,
     ) -> ConnectorHeartbeatResponse:
         self.secret_received = connector_secret
+        self.heartbeat_request = request
         if self.heartbeat_error:
             raise self.heartbeat_error
         return ConnectorHeartbeatResponse(
@@ -105,11 +116,11 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
     async with session_factory() as session:
         operations = SqlAlchemyOperationsRepository(session)
         await operations.unregister_local()
+        await operations.update_settings("Lifecycle Test", "Production", "INFO")
         service = RegistrationService(operations, client, encryption, settings, scheduler)
         response = await service.register(
             "https://saas.example.test",
             "one-time-registration-token",
-            "Lifecycle Test",
             None,
         )
         product = await operations.get_settings()
@@ -120,7 +131,9 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
         assert product.saas_status == "awaiting_first_heartbeat"
         assert scheduler.heartbeat_delay == 0.5
 
-        heartbeat = HeartbeatService(operations, client, encryption)
+        assert client.registration_request
+        assert client.registration_request.connector_name == "Lifecycle Test"
+        heartbeat = HeartbeatService(operations, client, encryption, settings.environment)
         delivery = await heartbeat.send()
         assert delivery.next_delay_seconds == 180
         assert delivery.first_heartbeat
@@ -131,6 +144,21 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
         assert product.last_saas_server_time is not None
         assert product.heartbeat_failure_count == 0
         assert client.secret_received == "remote-connector-secret"
+        assert client.heartbeat_request
+        assert client.heartbeat_request.name == "Lifecycle Test"
+        assert client.heartbeat_request.environment == settings.environment
+        connector_id = product.connector_id
+        tenant_id = product.tenant_id
+        instance_id = product.instance_id
+
+        await operations.update_settings("VITWO Production Connector", "Production", "INFO")
+        await heartbeat.send()
+        assert client.heartbeat_request.name == "VITWO Production Connector"
+        renamed = await operations.get_settings()
+        assert renamed.connector_display_name == "VITWO Production Connector"
+        assert renamed.connector_id == connector_id
+        assert renamed.tenant_id == tenant_id
+        assert renamed.instance_id == instance_id
 
         client.heartbeat_error = SaaSClientError("http_error", "Credentials rejected", 401)
         with pytest.raises(SaaSClientError):
@@ -159,11 +187,11 @@ async def test_failed_reregistration_preserves_existing_credentials() -> None:
     async with session_factory() as session:
         operations = SqlAlchemyOperationsRepository(session)
         await operations.unregister_local()
+        await operations.update_settings("Preserved Connector", "Production", "INFO")
         service = RegistrationService(operations, client, encryption, settings)
         await service.register(
             "https://saas.example.test",
             "first-valid-registration-token",
-            "Preserved Connector",
             None,
         )
         before = await operations.get_settings()
@@ -174,7 +202,6 @@ async def test_failed_reregistration_preserves_existing_credentials() -> None:
             await service.register(
                 "https://other.example.test",
                 "second-valid-registration-token",
-                "Replacement Connector",
                 None,
                 reregister=True,
                 confirmed=True,
@@ -183,6 +210,56 @@ async def test_failed_reregistration_preserves_existing_credentials() -> None:
         assert after.connector_id == prior_id
         assert after.encrypted_connector_secret == prior_secret
         assert after.saas_url == "https://saas.example.test"
+
+
+@pytest.mark.asyncio
+async def test_failed_initial_registration_keeps_configuration_without_credentials_or_secrets() -> (
+    None
+):
+    settings = get_settings()
+    client = FakeSaaSClient()
+    submitted_token = "raw-one-time-registration-token"
+    client.registration_error = SaaSClientError(
+        "registration_error",
+        "This connector appliance is already registered in PEKA SaaS.",
+        409,
+        error_code="INSTANCE_ALREADY_REGISTERED",
+        request_id="saas-request-456",
+    )
+    async with session_factory() as session:
+        operations = SqlAlchemyOperationsRepository(session)
+        await operations.unregister_local()
+        await operations.update_settings("Unregistered Appliance", "Production", "INFO")
+        service = RegistrationService(
+            operations,
+            client,
+            SecretEncryptionService(settings.encryption_key),
+            settings,
+        )
+        with pytest.raises(SaaSClientError):
+            await service.register(
+                "https://new-saas.example.test",
+                submitted_token,
+                None,
+            )
+
+        product = await operations.get_settings()
+        assert product.saas_status == "unregistered"
+        assert product.saas_url == "https://new-saas.example.test"
+        assert product.connector_display_name == "Unregistered Appliance"
+        assert product.connector_id is None
+        assert product.tenant_id is None
+        assert product.encrypted_connector_secret is None
+        assert product.registered_at is None
+        assert client.registration_calls == 1
+        assert client.registration_correlation_id
+
+        logs, _ = await operations.list_logs(None, "saas", None, 1, 100)
+        serialized_logs = " ".join(f"{item.message} {item.context}" for item in logs)
+        assert submitted_token not in serialized_logs
+        assert "INSTANCE_ALREADY_REGISTERED" in serialized_logs
+        assert "saas-request-456" in serialized_logs
+        assert "409" in serialized_logs
 
 
 def test_wrong_encryption_key_fails_safely() -> None:

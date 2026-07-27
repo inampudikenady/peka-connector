@@ -2,7 +2,6 @@ import asyncio
 import io
 import zipfile
 from collections.abc import Iterator
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,6 +57,16 @@ def test_first_run_login_refresh_logout_and_password_change(client: TestClient) 
     )
     assert invalid.status_code == 422
     _bootstrap(client)
+    activity = client.get("/api/v1/activity", headers=_login(client))
+    assert activity.status_code == 200
+    activity_payload = activity.json()
+    assert activity_payload["total"] >= 2
+    assert all(item["created_at"].endswith("Z") for item in activity_payload["items"])
+    assert [item["created_at"] for item in activity_payload["items"]] == sorted(
+        [item["created_at"] for item in activity_payload["items"]], reverse=True
+    )
+    assert all("details" not in item for item in activity_payload["items"])
+    assert ADMIN_PASSWORD not in activity.text
     assert client.get("/api/v1/auth/setup-status").json() == {"setup_required": False}
     assert (
         client.post(
@@ -157,73 +166,27 @@ def test_role_enforcement_and_last_administrator_safeguards(client: TestClient) 
     )
 
 
-def test_multiple_sources_manual_scan_metadata_and_history(client: TestClient) -> None:
+def test_generic_filesystem_source_creation_is_unavailable(client: TestClient) -> None:
     _bootstrap(client)
     headers = _login(client)
-    root = get_settings().sources_root
-    manuals = root / "manuals"
-    contracts = root / "contracts"
-    manuals.mkdir(exist_ok=True)
-    contracts.mkdir(exist_ok=True)
-    document = manuals / "guide.txt"
-    document.write_text("version one", encoding="utf-8")
-
-    def create(name: str, path: Path) -> dict[str, object]:
-        response = client.post(
-            "/api/v1/sources",
-            headers=headers,
-            json={
-                "plugin_type": "filesystem_documents",
-                "name": name,
-                "enabled": True,
-                "configuration": {
-                    "path": str(path),
-                    "include_patterns": ["**/*.txt"],
-                    "exclude_patterns": ["**/archive/**"],
-                    "scan_interval_seconds": 300,
-                },
-            },
-        )
-        assert response.status_code == 201, response.text
-        return response.json()
-
-    first = create("Manuals", manuals)
-    create("Contracts", contracts)
-    assert len(client.get("/api/v1/sources", headers=headers).json()) == 2
-    assert first["next_scheduled_scan_at"] is not None
-    source_id = first["id"]
-    scan = client.post(f"/api/v1/sources/{source_id}/scan", headers=headers).json()
-    assert scan["added_count"] == 1
-    scan = client.post(f"/api/v1/sources/{source_id}/scan", headers=headers).json()
-    assert scan["unchanged_count"] == 1
-    document.write_text("version two", encoding="utf-8")
-    scan = client.post(f"/api/v1/sources/{source_id}/scan", headers=headers).json()
-    assert scan["changed_count"] == 1
-    document.unlink()
-    scan = client.post(f"/api/v1/sources/{source_id}/scan", headers=headers).json()
-    assert scan["missing_count"] == 1
-    metadata = client.get(f"/api/v1/sources/{source_id}/documents", headers=headers).json()
-    assert metadata[0]["state"] == "missing"
-    history = client.get(f"/api/v1/sources/{source_id}/scans", headers=headers).json()
-    assert history["total"] == 4
-    assert {item["trigger"] for item in history["items"]} == {"manual"}
-    detail = client.get(
-        f"/api/v1/sources/{source_id}/scans/{history['items'][0]['id']}", headers=headers
-    )
-    assert detail.status_code == 200
-    assert detail.json()["correlation_id"]
-
-    disabled = client.put(
-        f"/api/v1/sources/{source_id}",
+    response = client.post(
+        "/api/v1/sources",
         headers=headers,
         json={
+            "plugin_type": "filesystem_documents",
             "name": "Manuals",
-            "enabled": False,
-            "configuration": first["configuration"],
+            "enabled": True,
+            "configuration": {
+                "path": str(get_settings().sources_root / "manuals"),
+                "include_patterns": ["**/*.txt"],
+                "exclude_patterns": [],
+                "scan_interval_seconds": 300,
+            },
         },
     )
-    assert disabled.status_code == 200
-    assert disabled.json()["next_scheduled_scan_at"] is None
+    assert response.status_code == 409
+    assert "not available" in response.json()["detail"]
+    assert client.get("/api/v1/sources", headers=headers).json() == []
 
 
 def test_read_only_cannot_mutate_saas_registration(client: TestClient) -> None:
@@ -248,7 +211,6 @@ def test_read_only_cannot_mutate_saas_registration(client: TestClient) -> None:
         json={
             "saas_url": "https://saas.example.test",
             "registration_token": "must-not-be-accepted",
-            "connector_display_name": "Test Connector",
         },
     )
     assert response.status_code == 403

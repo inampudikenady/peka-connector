@@ -1,6 +1,6 @@
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from app.api.dependencies import Administrator, CurrentUser, OperationsDep, SourceServiceDep
 from app.api.schemas import (
@@ -33,25 +33,13 @@ async def validate_configuration(
 
 @router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
 async def create_source(
-    request: SourceWrite,
-    actor: Administrator,
-    service: SourceServiceDep,
-    operations: OperationsDep,
+    _request: SourceWrite,
+    _actor: Administrator,
 ) -> object:
-    source = await service.create_source(
-        request.plugin_type, request.name, request.enabled, request.configuration
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Generic filesystem source creation is not available in this release.",
     )
-    await operations.record_event(
-        "source.created",
-        f"Source {source.name} created",
-        actor=actor,
-        target_type="source",
-        target_id=str(source.id),
-        details={"plugin_type": source.plugin_type},
-        component="sources",
-    )
-    await connector_scheduler.reconcile_source(source.id)
-    return await service.get_source(source.id)
 
 
 @router.get("/{source_id}", response_model=SourceResponse)
@@ -149,7 +137,10 @@ async def scan_source(
         raise
     await operations.record_event(
         "source.scan_completed",
-        f"Scan completed for {source.name}",
+        (
+            f"Scan completed for {source.name}: {result.added_count} added, "
+            f"{result.changed_count} changed, {result.missing_count} removed"
+        ),
         actor=actor,
         target_type="source",
         target_id=str(source_id),

@@ -9,7 +9,10 @@ An administrator-entered path must not turn the connector into an arbitrary host
 
 ## Decision
 
-Resolve every configured filesystem path and require it to equal `/data/sources` or have that resolved root as an ancestor. Reject traversal and configured symlink escapes, require directory read/search permissions, do not follow discovery symlinks, and keep the Docker mount read-only. Do not implement file browsing or mount editing in the UI.
+Resolve every configured external filesystem path and require it to equal `/data/external-sources`
+or have that resolved root as an ancestor. Reject traversal and configured symlink escapes, require
+directory read/search permissions, do not follow discovery symlinks, and keep the Docker mount
+read-only. Do not implement file browsing or mount editing in the UI.
 
 ## Consequences
 

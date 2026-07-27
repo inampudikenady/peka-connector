@@ -1,0 +1,31 @@
+import {
+  Alert, Button, Card, CardActions, CardContent, Checkbox, FormControlLabel, Grid,
+  MenuItem, Stack, TextField, Typography,
+} from '@mui/material';
+import { useCallback, useEffect, useState } from 'react';
+
+import { api } from '../api/client';
+import type { PrometheusConfiguration } from '../api/types';
+import { useAuth } from '../auth/AuthContext';
+import { LoadingState } from '../components/LoadingState';
+import { useToast } from '../components/ToastProvider';
+import { formatTimestamp } from '../utils/time';
+
+const empty = { name: '', base_url: '', auth_type: 'none', username: '', secret: '', tls_verify: true, request_timeout_seconds: 10, scan_interval_seconds: 300, enabled: true };
+
+export function PrometheusPage() {
+  const { user } = useAuth(); const admin = user?.role === 'administrator'; const toast = useToast();
+  const [items, setItems] = useState<PrometheusConfiguration[]>([]); const [form, setForm] = useState(empty);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true); const [error, setError] = useState('');
+  const load = useCallback(async () => { try { setLoading(true); setItems(await api.prometheusConfigurations()); setError(''); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Prometheus configurations could not be loaded'); } finally { setLoading(false); } }, []);
+  useEffect(() => { void load(); }, [load]);
+  const save = async () => { try { if (editingId) await api.updatePrometheusConfiguration(editingId, form); else await api.createPrometheusConfiguration(form); setForm(empty); setEditingId(null); await load(); toast.show('Prometheus configuration saved.', 'success'); } catch (reason) { toast.show(reason instanceof Error ? reason.message : 'Save failed', 'error'); } };
+  const act = async (item: PrometheusConfiguration, action: 'test' | 'scan') => { try { if (action === 'test') { const result = await api.testPrometheus(item.id); toast.show(result.message, 'success'); } else { const result = await api.scanPrometheus(item.id); toast.show(`Collected ${result.target_count} active targets.`, 'success'); } await load(); } catch (reason) { toast.show(reason instanceof Error ? reason.message : `${action} failed`, 'error'); } };
+  return <Stack spacing={3}><div><Typography variant="h4" fontWeight={800}>Prometheus</Typography><Typography color="text.secondary">Observed active targets and current scrape health. Prometheus does not define ownership or lifecycle.</Typography></div>
+    {error && <Alert severity="error">{error}</Alert>}
+    {admin && <Card variant="outlined"><CardContent><Stack spacing={2}><Typography variant="h6">{editingId ? 'Edit source configuration' : 'Add source configuration'}</Typography><TextField label="Configuration name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /><TextField label="Base URL" placeholder="https://prometheus.example.com" value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} /><TextField select label="Authentication" value={form.auth_type} onChange={(event) => setForm({ ...form, auth_type: event.target.value })}><MenuItem value="none">None</MenuItem><MenuItem value="basic">Basic</MenuItem><MenuItem value="bearer">Bearer token</MenuItem></TextField>{form.auth_type === 'basic' && <TextField label="Username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />}{form.auth_type !== 'none' && <TextField label={form.auth_type === 'bearer' ? 'Bearer token' : 'Password'} type="password" value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} helperText="Credentials are encrypted and are not shown again." />}<Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}><TextField label="Request timeout (seconds)" type="number" value={form.request_timeout_seconds} onChange={(event) => setForm({ ...form, request_timeout_seconds: Number(event.target.value) })} /><TextField label="Scan interval (seconds)" type="number" value={form.scan_interval_seconds} onChange={(event) => setForm({ ...form, scan_interval_seconds: Number(event.target.value) })} /></Stack><FormControlLabel control={<Checkbox checked={form.tls_verify} onChange={(event) => setForm({ ...form, tls_verify: event.target.checked })} />} label="Verify TLS certificates" /></Stack></CardContent><CardActions>{editingId && <Button onClick={() => { setEditingId(null); setForm(empty); }}>Cancel</Button>}<Button variant="contained" disabled={!form.name || !form.base_url} onClick={() => void save()}>Save configuration</Button></CardActions></Card>}
+    {loading ? <LoadingState label="Loading Prometheus configurations" /> : <Grid container spacing={2}>{items.map((item) => <Grid key={item.id} size={{ xs: 12, md: 6 }}><Card variant="outlined"><CardContent><Typography variant="h6">{item.name}</Typography><Typography color="text.secondary">{item.base_url}</Typography><Typography sx={{ mt: 2 }}>{item.target_count} targets · {item.healthy_target_count} healthy · {item.unhealthy_target_count} unhealthy</Typography><Typography variant="body2">Last success: {formatTimestamp(item.last_successful_scan_at)}</Typography>{item.last_error && <Alert severity="error" sx={{ mt: 1 }}>{item.last_error}</Alert>}</CardContent>{admin && <CardActions><Button onClick={() => { setEditingId(item.id); setForm({ name: item.name, base_url: item.base_url, auth_type: item.auth_type, username: item.username ?? '', secret: '', tls_verify: item.tls_verify, request_timeout_seconds: item.request_timeout_seconds, scan_interval_seconds: item.scan_interval_seconds, enabled: item.enabled }); }}>Edit</Button><Button onClick={() => void act(item, 'test')}>Test connection</Button><Button variant="contained" disabled={!item.enabled} onClick={() => void act(item, 'scan')}>Run now</Button></CardActions>}</Card></Grid>)}</Grid>}
+    {!loading && items.length === 0 && <Alert severity="info">Prometheus is not configured. Inventory coverage remains “Unknown,” not “missing.”</Alert>}
+  </Stack>;
+}

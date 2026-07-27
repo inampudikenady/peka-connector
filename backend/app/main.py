@@ -19,6 +19,9 @@ from app.application.services.auth import (
     InvalidRefreshTokenError,
     SetupUnavailableError,
 )
+from app.application.services.cmdb import CMDBError
+from app.application.services.documents import DocumentError, ManagedDocumentService
+from app.application.services.prometheus import PrometheusError
 from app.application.services.saas import (
     ConfirmationRequiredError,
     RegistrationStateError,
@@ -54,10 +57,11 @@ from app.plugins.registry import plugin_registry
 logger = logging.getLogger(__name__)
 settings = get_settings()
 settings.ensure_data_directories()
+settings.ensure_managed_cmdb_directory()
 configure_logging(settings.log_level, settings.data_root / "logs")
 
 if not plugin_registry.list():
-    plugin_registry.register(FilesystemDocumentSourcePlugin(settings.sources_root))
+    plugin_registry.register(FilesystemDocumentSourcePlugin(settings.filesystem_sources_root))
 
 
 class SPAStaticFiles(StaticFiles):
@@ -79,6 +83,7 @@ class SPAStaticFiles(StaticFiles):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     async with session_factory() as session:
+        await ManagedDocumentService(session, settings).ensure_managed_source()
         operations = SqlAlchemyOperationsRepository(session)
         product = await operations.get_settings()
         encryption = SecretEncryptionService(settings.encryption_key)
@@ -180,7 +185,10 @@ async def saas_unavailable(_: Request, exc: SaaSClientError) -> JSONResponse:
     response_status = exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE
     if response_status >= 500:
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE
-    return JSONResponse(status_code=response_status, content={"detail": str(exc)})
+    content: dict[str, str] = {"detail": str(exc)}
+    if exc.error_code:
+        content["code"] = exc.error_code
+    return JSONResponse(status_code=response_status, content=content)
 
 
 @app.exception_handler(HeartbeatInProgressError)
@@ -224,6 +232,30 @@ async def scan_in_progress(_: Request, exc: ScanInProgressError) -> JSONResponse
 async def plugin_error(_: Request, exc: PluginError) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(DocumentError)
+async def document_error(_: Request, exc: DocumentError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(CMDBError)
+async def cmdb_error(_: Request, exc: CMDBError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(PrometheusError)
+async def prometheus_error(_: Request, exc: PrometheusError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
     )
 
 

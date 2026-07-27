@@ -13,11 +13,13 @@
 - persistent instance identity and typed registration/heartbeat contracts
 - encrypted connector credential, heartbeat backoff, lifecycle states, and UI controls
 - real SaaS registration/heartbeat contract, Retry Now, connection-state engine, latency/server-time telemetry, and restart recovery
+- fixed managed-document source, secure streamed UI upload, stability reconciliation, version hashing, durable spool/tombstones, and typed idempotent PEKA delivery
+- singular system-managed Uploaded Documents source with Documents-owned settings and legacy-source preservation
 
-## Next: outbound synchronization
+## Next: server-side document processing contract completion
 
-- incremental SaaS metadata transfer and tombstones
-- durable spool processing, bounded upload concurrency, retention, and recovery
+- production validation against the final PEKA document endpoint and ingestion-status reporting
+- spool retention controls, capacity alerts, performance testing, and failure injection
 - connector-secret rotation and remote unregister when SaaS contracts are defined
 - customer proxy configuration and enterprise CA trust workflow
 

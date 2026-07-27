@@ -9,7 +9,12 @@ PEKA Connector is delivered as an on-premises appliance. Separate frontend and b
 
 ## Decision
 
-Produce one multi-stage Docker image. A Node.js stage compiles React, a Python stage installs the backend, and a minimal Python runtime contains both outputs. FastAPI serves versioned API routes and the compiled SPA on port 8080. SQLite uses `/data/state`, and customer sources are mounted at `/data/sources` read-only. The repository retains separate backend and frontend source trees and a two-process local development workflow.
+Produce one multi-stage Docker image. A Node.js stage compiles React, a Python stage installs the
+backend, and a minimal Python runtime contains both outputs. FastAPI serves versioned API routes and
+the compiled SPA on port 8080. SQLite uses `/data/state`, and external customer sources are mounted
+at `/data/external-sources` read-only. Managed upload sources use dedicated writable volumes. The
+repository retains separate backend and frontend source trees and a two-process local development
+workflow.
 
 ## Consequences
 

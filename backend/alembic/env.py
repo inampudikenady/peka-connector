@@ -5,7 +5,14 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.core.config import get_settings
 from app.infrastructure.database.base import Base
-from app.infrastructure.database.models import DocumentModel, SourceModel, UserModel  # noqa: F401
+from app.infrastructure.database.models import (  # noqa: F401
+    CMDBDatasetModel,
+    DocumentModel,
+    InventoryAssetModel,
+    PrometheusConfigurationModel,
+    SourceModel,
+    UserModel,
+)
 
 config = context.config
 if config.config_file_name is not None:

@@ -1,4 +1,16 @@
-from app.infrastructure.database.models.document import DocumentModel
+from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
+from app.infrastructure.database.models.inventory import (
+    CMDBDatasetModel,
+    CMDBDatasetVersionModel,
+    CMDBMappingProfileModel,
+    CMDBRecordModel,
+    InventoryAssetModel,
+    InventoryConflictModel,
+    InventoryCorrelationModel,
+    InventoryIdentityModel,
+    InventoryObservationModel,
+    PrometheusConfigurationModel,
+)
 from app.infrastructure.database.models.operations import (
     ApplicationLogModel,
     AuditEventModel,
@@ -12,6 +24,17 @@ __all__ = [
     "ApplicationLogModel",
     "AuditEventModel",
     "DocumentModel",
+    "DocumentDeliveryJobModel",
+    "CMDBDatasetModel",
+    "CMDBDatasetVersionModel",
+    "CMDBMappingProfileModel",
+    "CMDBRecordModel",
+    "InventoryAssetModel",
+    "InventoryConflictModel",
+    "InventoryCorrelationModel",
+    "InventoryIdentityModel",
+    "InventoryObservationModel",
+    "PrometheusConfigurationModel",
     "ProductSettingsModel",
     "RefreshTokenModel",
     "ScanHistoryModel",

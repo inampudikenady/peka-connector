@@ -42,11 +42,13 @@ COPY --chown=peka:peka backend/alembic.ini ./alembic.ini
 COPY --chown=peka:peka backend/docker-entrypoint.sh ./docker-entrypoint.sh
 COPY --from=frontend-builder --chown=peka:peka /build/frontend/dist ./static
 
-RUN mkdir -p /data/state /data/config /data/logs /data/spool /data/sources \
+RUN mkdir -p /data/state /data/config /data/logs /data/spool /data/external-sources /data/sources/documents /data/sources/cmdb \
     && chown peka:peka /data \
     && chown peka:peka /data/state /data/config /data/logs /data/spool \
     && chmod 0700 /data/state /data/config /data/logs /data/spool \
-    && chmod 0755 /data/sources \
+    && chown peka:peka /data/sources/documents /data/sources/cmdb \
+    && chmod 0755 /data/external-sources /data/sources \
+    && chmod 0700 /data/sources/documents /data/sources/cmdb \
     && chmod 0755 ./docker-entrypoint.sh
 
 USER peka

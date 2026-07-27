@@ -6,6 +6,7 @@ from sqlalchemy import JSON, Boolean, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database.base import Base
+from app.infrastructure.database.types import UTCDateTime
 
 
 class AuditEventModel(Base):
@@ -21,7 +22,9 @@ class AuditEventModel(Base):
     target_id: Mapped[str | None] = mapped_column(String(100), default=None)
     message: Mapped[str] = mapped_column(String(1000))
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=lambda: datetime.now(UTC), index=True
+    )
 
 
 class ApplicationLogModel(Base):
@@ -32,7 +35,9 @@ class ApplicationLogModel(Base):
     component: Mapped[str] = mapped_column(String(100), index=True)
     message: Mapped[str] = mapped_column(Text)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=lambda: datetime.now(UTC), index=True
+    )
 
 
 class ProductSettingsModel(Base):
@@ -50,18 +55,18 @@ class ProductSettingsModel(Base):
     instance_id: Mapped[str | None] = mapped_column(String(36), unique=True, default=None)
     encrypted_connector_secret: Mapped[str | None] = mapped_column(Text, default=None)
     encryption_key_check: Mapped[str | None] = mapped_column(Text, default=None)
-    registered_at: Mapped[datetime | None] = mapped_column(default=None)
+    registered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     heartbeat_interval_seconds: Mapped[int] = mapped_column(default=300)
-    last_heartbeat_attempt_at: Mapped[datetime | None] = mapped_column(default=None)
-    last_heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
-    last_heartbeat_failed_at: Mapped[datetime | None] = mapped_column(default=None)
-    next_heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+    last_heartbeat_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_heartbeat_failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    next_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     last_heartbeat_status: Mapped[str | None] = mapped_column(String(32), default=None)
     last_heartbeat_error: Mapped[str | None] = mapped_column(String(2000), default=None)
     heartbeat_failure_count: Mapped[int] = mapped_column(default=0)
     heartbeat_job_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     heartbeat_round_trip_ms: Mapped[float | None] = mapped_column(Float, default=None)
-    last_saas_server_time: Mapped[datetime | None] = mapped_column(default=None)
+    last_saas_server_time: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     updated_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+        UTCDateTime(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )

@@ -16,7 +16,7 @@ from app.api.schemas import (
     SaaSConnectivityRequest,
     SaaSRegistrationRequest,
 )
-from app.infrastructure.scheduling import connector_scheduler
+from app.infrastructure.scheduling import HeartbeatInProgressError, connector_scheduler
 
 router = APIRouter()
 
@@ -32,11 +32,12 @@ async def update_product_settings(
     actor: Administrator,
     operations: OperationsDep,
 ) -> object:
+    current = await operations.get_settings()
+    name_changed = current.connector_display_name != request.connector_display_name
     settings = await operations.update_settings(
         request.connector_display_name,
         request.environment_label,
         request.log_level,
-        request.timezone,
     )
     logging.getLogger().setLevel(request.log_level)
     await operations.record_event(
@@ -45,9 +46,51 @@ async def update_product_settings(
         actor=actor,
         target_type="settings",
         target_id="1",
+        details={"connector_display_name": settings.connector_display_name},
         component="settings",
     )
-    return settings
+    if name_changed:
+        await operations.record_event(
+            "connector.display_name_changed",
+            f"Connector display name changed to {settings.connector_display_name}",
+            actor=actor,
+            target_type="connector",
+            target_id=settings.instance_id,
+            component="settings",
+        )
+    warning: str | None = None
+    if name_changed and settings.connector_id and settings.encrypted_connector_secret:
+        try:
+            await connector_scheduler.retry_heartbeat_now()
+        except HeartbeatInProgressError:
+            warning = (
+                "Connector name was saved locally. An active heartbeat will synchronize it "
+                "with PEKA."
+            )
+        except Exception:
+            warning = (
+                "Connector name was saved locally, but PEKA could not be updated. "
+                "A later heartbeat will retry automatically."
+            )
+            await operations.record_event(
+                "connector.metadata_sync_deferred",
+                "Connector name saved locally; PEKA metadata update deferred",
+                actor=actor,
+                target_type="connector",
+                target_id=settings.connector_id,
+                details={"connector_display_name": settings.connector_display_name},
+                level="WARNING",
+                component="heartbeat",
+            )
+        settings = await operations.refresh_settings()
+        if settings.last_heartbeat_status == "failed":
+            warning = (
+                "Connector name was saved locally, but PEKA could not be updated. "
+                "A later heartbeat will retry automatically."
+            )
+    response = ProductSettingsResponse.model_validate(settings).model_dump()
+    response["metadata_sync_warning"] = warning
+    return response
 
 
 @router.post("/saas/test", response_model=ActionResponse)
@@ -57,7 +100,7 @@ async def test_saas(
     service: RegistrationServiceDep,
 ) -> ActionResponse:
     await service.test_connectivity(request.saas_url)
-    return ActionResponse(message="PEKA SaaS endpoint is reachable")
+    return ActionResponse(message="PEKA endpoint is reachable")
 
 
 @router.post("/saas/register", response_model=ProductSettingsResponse)
@@ -70,12 +113,11 @@ async def register_saas(
     await service.register(
         request.saas_url,
         request.registration_token,
-        request.connector_display_name,
         actor,
     )
     await operations.record_event(
         "connector.registered",
-        "Connector registered with PEKA SaaS",
+        "Connector registered with PEKA",
         actor=actor,
         target_type="connector",
         component="saas",
@@ -93,14 +135,13 @@ async def reregister_saas(
     await service.register(
         request.saas_url,
         request.registration_token,
-        request.connector_display_name,
         actor,
         reregister=True,
         confirmed=request.confirmed,
     )
     await operations.record_event(
         "connector.reregistered",
-        "Connector re-registered with PEKA SaaS",
+        "Connector re-registered with PEKA",
         actor=actor,
         target_type="connector",
         component="saas",

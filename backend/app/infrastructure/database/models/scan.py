@@ -6,6 +6,7 @@ from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.base import Base
+from app.infrastructure.database.types import UTCDateTime
 
 if TYPE_CHECKING:
     from app.infrastructure.database.models.source import SourceModel
@@ -20,8 +21,8 @@ class ScanHistoryModel(Base):
     )
     status: Mapped[str] = mapped_column(String(32), index=True)
     trigger: Mapped[str] = mapped_column(String(20), default="manual", index=True)
-    started_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
-    completed_at: Mapped[datetime | None] = mapped_column(default=None)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=lambda: datetime.now(UTC))
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     discovered_count: Mapped[int] = mapped_column(default=0)
     added_count: Mapped[int] = mapped_column(default=0)
     changed_count: Mapped[int] = mapped_column(default=0)

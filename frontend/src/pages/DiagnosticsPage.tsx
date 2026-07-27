@@ -15,9 +15,9 @@ export function DiagnosticsPage() {
   if (error) return <Alert severity="error">{error}</Alert>;
   if (!data) return <LoadingState label="Running diagnostics" />;
   const facts = [
-    ['Instance ID', data.instance_id], ['Registration State', data.registration_state], ['SaaS Hostname', data.saas_hostname ?? 'Not configured'],
+    ['Instance ID', data.instance_id], ['Registration State', data.registration_state], ['PEKA Hostname', data.saas_hostname ?? 'Not configured'],
     ['Last Heartbeat Attempt', formatTimestamp(data.last_heartbeat_attempt_at)], ['Last Successful Heartbeat', formatTimestamp(data.last_successful_heartbeat_at)],
-    ['Next Heartbeat', formatTimestamp(data.next_heartbeat_at, 'UTC', 'Not scheduled')], ['Heartbeat Interval', `${data.heartbeat_interval_seconds} seconds`],
+    ['Next Heartbeat', formatTimestamp(data.next_heartbeat_at, 'Not scheduled')], ['Heartbeat Interval', `${data.heartbeat_interval_seconds} seconds`],
     ['Consecutive Failures', String(data.consecutive_failures)], ['Round-Trip Latency', data.heartbeat_round_trip_ms === null ? 'Unavailable' : `${data.heartbeat_round_trip_ms.toFixed(1)} ms`],
     ['Scheduler', data.scheduler_running ? 'Running' : 'Stopped'], ['Heartbeat Job', data.heartbeat_job_scheduled ? 'Scheduled' : 'Not scheduled'], ['Source Jobs', String(data.source_scheduler_job_count)],
   ];

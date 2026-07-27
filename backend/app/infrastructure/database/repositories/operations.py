@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import sanitize
 from app.domain.entities.source import UserAccount
 from app.domain.services.connector_status import derive_connection_state
+from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
 from app.infrastructure.database.models.operations import (
     ApplicationLogModel,
     AuditEventModel,
@@ -54,14 +55,17 @@ class SqlAlchemyOperationsRepository:
         )
         await self._session.commit()
 
-    async def list_activity(self, limit: int = 100, offset: int = 0) -> list[AuditEventModel]:
+    async def list_activity_page(
+        self, page: int, page_size: int
+    ) -> tuple[list[AuditEventModel], int]:
+        total = int(await self._session.scalar(select(func.count(AuditEventModel.id))) or 0)
         result = await self._session.scalars(
             select(AuditEventModel)
             .order_by(AuditEventModel.created_at.desc())
-            .offset(offset)
-            .limit(limit)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         )
-        return list(result.all())
+        return list(result.all()), total
 
     async def list_logs(
         self,
@@ -151,8 +155,13 @@ class SqlAlchemyOperationsRepository:
         model.encryption_key_check = encrypted_check
         await self._session.commit()
 
-    async def begin_registration(self) -> ProductSettingsModel:
+    async def begin_registration(
+        self,
+        saas_url: str | None = None,
+    ) -> ProductSettingsModel:
         model = await self.get_settings()
+        if saas_url is not None:
+            model.saas_url = saas_url
         model.saas_status = "registering"
         model.last_heartbeat_error = None
         await self._session.commit()
@@ -173,7 +182,6 @@ class SqlAlchemyOperationsRepository:
         heartbeat_interval_seconds: int,
         registered_at: datetime,
         saas_url: str,
-        display_name: str,
     ) -> ProductSettingsModel:
         model = await self.get_settings()
         model.connector_id = connector_id
@@ -182,7 +190,6 @@ class SqlAlchemyOperationsRepository:
         model.heartbeat_interval_seconds = heartbeat_interval_seconds
         model.registered_at = registered_at
         model.saas_url = saas_url
-        model.connector_display_name = display_name
         model.saas_status = "awaiting_first_heartbeat"
         model.last_heartbeat_attempt_at = None
         model.last_heartbeat_at = None
@@ -289,13 +296,11 @@ class SqlAlchemyOperationsRepository:
         connector_display_name: str,
         environment_label: str,
         log_level: str,
-        timezone: str,
     ) -> ProductSettingsModel:
         model = await self.get_settings()
         model.connector_display_name = connector_display_name
         model.environment_label = environment_label
         model.log_level = log_level
-        model.timezone = timezone
         await self._session.commit()
         await self._session.refresh(model)
         return model
@@ -318,6 +323,23 @@ class SqlAlchemyOperationsRepository:
         recent_events = await self._session.scalars(
             select(AuditEventModel).order_by(AuditEventModel.created_at.desc()).limit(12)
         )
+        managed_source = await self._session.scalar(
+            select(SourceModel).where(SourceModel.system_managed.is_(True)).limit(1)
+        )
+        documents = list(
+            (
+                await self._session.scalars(
+                    select(DocumentModel)
+                    .join(SourceModel, SourceModel.id == DocumentModel.source_id)
+                    .where(SourceModel.system_managed.is_(True))
+                )
+            ).all()
+        )
+        last_delivery = await self._session.scalar(
+            select(func.max(DocumentDeliveryJobModel.completed_at)).where(
+                DocumentDeliveryJobModel.state == "SUCCEEDED"
+            )
+        )
         return {
             "connector_status": "operational",
             "saas_status": settings.saas_status,
@@ -337,4 +359,30 @@ class SqlAlchemyOperationsRepository:
             "enabled_source_count": enabled_count,
             "unhealthy_source_count": unhealthy_count,
             "recent_events": list(recent_events.all()),
+            "document_total": len(documents),
+            "document_queued": sum(
+                item.delivery_status in {"PENDING", "QUEUED", "PENDING_DELETE"}
+                for item in documents
+            ),
+            "document_uploading": sum(item.delivery_status == "UPLOADING" for item in documents),
+            "document_uploaded": sum(item.delivery_status == "UPLOADED" for item in documents),
+            "document_failed": sum(item.delivery_status == "FAILED" for item in documents),
+            "document_unsupported": sum(item.local_status == "UNSUPPORTED" for item in documents),
+            "last_document_delivery_at": last_delivery,
+            "document_endpoint_status": (
+                "available"
+                if last_delivery
+                else "pending"
+                if settings.connector_id
+                else "unavailable"
+            ),
+            "document_source_health": (
+                managed_source.health_status if managed_source else "missing"
+            ),
+            "document_source_last_scan_at": (
+                managed_source.last_scan_at if managed_source else None
+            ),
+            "document_source_next_scan_at": (
+                managed_source.next_scheduled_scan_at if managed_source else None
+            ),
         }

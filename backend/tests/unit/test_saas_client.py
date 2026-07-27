@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from app.domain.ports.saas import (
     ConnectorHeartbeatRequest,
     ConnectorRegistrationRequest,
+    DocumentDeliveryMetadata,
     SaaSClientError,
     SourceHeartbeatSummary,
 )
@@ -81,20 +83,41 @@ async def test_registration_rejects_malformed_response() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status_code", "message"),
+    ("code", "message"),
     [
-        (400, "invalid or malformed"),
-        (401, "rejected the supplied credentials"),
-        (403, "not permitted"),
-        (404, "endpoint was not found"),
-        (409, "already be registered"),
-        (410, "expired or was revoked"),
-        (429, "rate limit"),
-        (503, "temporarily unavailable"),
+        ("TOKEN_NOT_FOUND", "The registration token is invalid."),
+        (
+            "TOKEN_EXPIRED",
+            "The registration token has expired. Generate a new token in PEKA.",
+        ),
+        (
+            "TOKEN_USED",
+            "The registration token has already been used. Generate a new token in PEKA.",
+        ),
+        (
+            "TOKEN_REVOKED",
+            "The registration token was revoked. Generate a new token in PEKA.",
+        ),
+        (
+            "INSTANCE_ALREADY_REGISTERED",
+            "This connector appliance is already registered in PEKA.",
+        ),
+        (
+            "TENANT_MISMATCH",
+            "The registration token is not valid for this connector registration.",
+        ),
+        ("VALIDATION_FAILED", "The connector name is not valid."),
+        ("REGISTRATION_NOT_PERMITTED", "Connector registration is not permitted."),
     ],
 )
-async def test_registration_maps_remote_errors(status_code: int, message: str) -> None:
-    transport = httpx.MockTransport(lambda request: httpx.Response(status_code))
+async def test_registration_maps_structured_remote_errors(code: str, message: str) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            409,
+            json={"code": code, "message": "The connector name is not valid."},
+            headers={"X-Request-ID": "saas-request-123"},
+        )
+    )
     client = client_for(transport)
     request = ConnectorRegistrationRequest(
         registration_token="secret-value-not-in-error",
@@ -104,9 +127,105 @@ async def test_registration_maps_remote_errors(status_code: int, message: str) -
         instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
         capabilities=["filesystem_documents"],
     )
-    with pytest.raises(SaaSClientError, match=message) as captured:
-        await client.register_connector("https://saas.example.test", request)
+    with pytest.raises(SaaSClientError) as captured:
+        await client.register_connector(
+            "https://saas.example.test", request, "local-correlation-123"
+        )
+    assert str(captured.value) == message
+    assert captured.value.error_code == code
+    assert captured.value.status_code == 409
+    assert captured.value.request_id == "saas-request-123"
     assert "secret-value-not-in-error" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_unknown_registration_code_uses_safe_saas_message() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            400,
+            json={"code": "NEW_SAFE_CODE", "message": "A safe registration explanation."},
+        )
+    )
+    client = client_for(transport)
+    with pytest.raises(SaaSClientError) as captured:
+        await client.register_connector(
+            "https://saas.example.test",
+            ConnectorRegistrationRequest(
+                registration_token="one-time-registration-token",
+                connector_name="Connector",
+                connector_version="0.2.0",
+                environment="production",
+                instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+                capabilities=["filesystem_documents"],
+            ),
+        )
+    assert str(captured.value) == "A safe registration explanation."
+    assert captured.value.error_code == "NEW_SAFE_CODE"
+
+
+@pytest.mark.asyncio
+async def test_structured_error_never_relays_token_bearing_message() -> None:
+    submitted_token = "one-time-registration-token"
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            400,
+            json={
+                "code": "FUTURE_ERROR",
+                "message": f"registration_token={submitted_token}",
+            },
+        )
+    )
+    client = client_for(transport)
+    with pytest.raises(SaaSClientError) as captured:
+        await client.register_connector(
+            "https://saas.example.test",
+            ConnectorRegistrationRequest(
+                registration_token=submitted_token,
+                connector_name="Connector",
+                connector_version="0.2.0",
+                environment="production",
+                instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+                capabilities=["filesystem_documents"],
+            ),
+        )
+    assert str(captured.value) == "Connector registration failed."
+    assert submitted_token not in str(captured.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(502, text="<html>proxy failure</html>"),
+        httpx.Response(400, json={"code": 123, "message": ["not", "safe"]}),
+    ],
+)
+async def test_malformed_registration_error_uses_generic_fallback(
+    response: httpx.Response,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return response
+
+    client = client_for(httpx.MockTransport(handler))
+    with pytest.raises(SaaSClientError) as captured:
+        await client.register_connector(
+            "https://saas.example.test",
+            ConnectorRegistrationRequest(
+                registration_token="one-time-registration-token",
+                connector_name="Connector",
+                connector_version="0.2.0",
+                environment="production",
+                instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+                capabilities=["filesystem_documents"],
+            ),
+        )
+    assert str(captured.value) == "Connector registration failed."
+    assert "proxy failure" not in str(captured.value)
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -135,6 +254,8 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
         "connector-secret",
         ConnectorHeartbeatRequest(
             instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+            name="VITWO Production Connector",
+            environment="production",
             connector_version="0.2.0",
             timestamp=datetime(2026, 7, 20, 12, tzinfo=UTC),
             status="healthy",
@@ -150,6 +271,8 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
     assert isinstance(body, dict)
     assert body == {
         "instance_id": "41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+        "name": "VITWO Production Connector",
+        "environment": "production",
         "connector_version": "0.2.0",
         "timestamp": "2026-07-20T12:00:00Z",
         "status": "healthy",
@@ -159,3 +282,62 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
     }
     assert response.accepted
     assert response.next_heartbeat_seconds == 240
+
+
+@pytest.mark.asyncio
+async def test_document_delivery_contract_is_authenticated_idempotent_and_acknowledged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "policy.txt"
+    path.write_bytes(b"policy bytes")
+    digest = "8" * 64
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers["Authorization"]
+        captured["connector"] = request.headers["X-PEKA-Connector-ID"]
+        captured["idempotency"] = request.headers["Idempotency-Key"]
+        body = request.content
+        captured["has_metadata"] = b'"operation": "upsert"' in body
+        captured["has_file"] = b"policy bytes" in body
+        return httpx.Response(
+            200,
+            json={
+                "accepted": True,
+                "document_id": "remote-document",
+                "version_id": "remote-version",
+                "content_hash": f"sha256:{digest}",
+                "ingestion_status": "RECEIVED",
+            },
+        )
+
+    connector_id = UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368")
+    response = await client_for(httpx.MockTransport(handler)).deliver_document(
+        "https://peka.example.test",
+        connector_id,
+        "connector-secret",
+        DocumentDeliveryMetadata(
+            source_id="d0c0a001-6f05-4bd8-a123-000000000001",
+            document_key="uploaded-documents/policy.txt",
+            relative_path="policy.txt",
+            filename="policy.txt",
+            mime_type="text/plain",
+            size_bytes=12,
+            content_hash=f"sha256:{digest}",
+            modified_at=datetime(2026, 7, 21, 10, 30, tzinfo=UTC),
+            operation="upsert",
+            connector_version="0.2.0",
+        ),
+        "stable-idempotency-key",
+        path,
+    )
+    assert captured == {
+        "path": f"/api/v1/connectors/{connector_id}/documents",
+        "authorization": "Bearer connector-secret",
+        "connector": str(connector_id),
+        "idempotency": "stable-idempotency-key",
+        "has_metadata": True,
+        "has_file": True,
+    }
+    assert response.accepted and response.content_hash == f"sha256:{digest}"

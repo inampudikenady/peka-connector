@@ -9,8 +9,15 @@ A mount named for documents implies one source and prevents a durable appliance 
 
 ## Decision
 
-Mount the customer-selected host tree read-only at `/data/sources`. Each filesystem source stores a distinct path at that root or below it, such as `/data/sources/manuals` and `/data/sources/contracts`. Compose exposes only `PEKA_SOURCES_PATH` for selecting the host root.
+Mount the customer-selected host tree read-only at `/data/external-sources`. Each external
+filesystem source stores a distinct path at that root or below it, such as
+`/data/external-sources/manuals` and `/data/external-sources/contracts`. Managed document and CMDB
+uploads use separate writable volumes under `/data/sources`. Compose exposes
+`PEKA_SOURCES_PATH` for selecting the external host root.
 
 ## Consequences
 
-Multiple filesystem sources share one narrowly scoped read-only mount. Administrators organize host subdirectories and configure them independently in the UI. Changing the host mount remains a deployment action, not an application setting.
+Multiple external filesystem sources share one narrowly scoped read-only mount. Administrators
+organize host subdirectories and configure them independently. Changing the host mount remains a
+deployment action, not an application setting. The separate mount prevents writable managed-source
+volumes from being nested beneath a read-only bind.

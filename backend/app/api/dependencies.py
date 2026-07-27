@@ -7,6 +7,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.auth import AuthenticationService
+from app.application.services.cmdb import CMDBService
+from app.application.services.documents import ManagedDocumentService
+from app.application.services.inventory import InventoryService
+from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import RegistrationService
 from app.application.services.sources import SourceService
 from app.application.services.users import UserService
@@ -53,6 +57,22 @@ def get_user_service(session: SessionDep) -> UserService:
 
 def get_operations_repository(session: SessionDep) -> SqlAlchemyOperationsRepository:
     return SqlAlchemyOperationsRepository(session)
+
+
+def get_document_service(session: SessionDep, settings: SettingsDep) -> ManagedDocumentService:
+    return ManagedDocumentService(session, settings)
+
+
+def get_cmdb_service(session: SessionDep, settings: SettingsDep) -> CMDBService:
+    return CMDBService(session, settings)
+
+
+def get_inventory_service(session: SessionDep) -> InventoryService:
+    return InventoryService(session)
+
+
+def get_prometheus_service(session: SessionDep, settings: SettingsDep) -> PrometheusService:
+    return PrometheusService(session, SecretEncryptionService(settings.encryption_key))
 
 
 def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
@@ -111,4 +131,8 @@ AuthServiceDep = Annotated[AuthenticationService, Depends(get_auth_service)]
 SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 OperationsDep = Annotated[SqlAlchemyOperationsRepository, Depends(get_operations_repository)]
+DocumentServiceDep = Annotated[ManagedDocumentService, Depends(get_document_service)]
+CMDBServiceDep = Annotated[CMDBService, Depends(get_cmdb_service)]
+InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
+PrometheusServiceDep = Annotated[PrometheusService, Depends(get_prometheus_service)]
 RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

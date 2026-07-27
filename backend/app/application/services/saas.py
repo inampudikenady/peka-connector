@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.core.config import Settings
 from app.core.version import CONNECTOR_VERSION
@@ -51,9 +51,9 @@ def validate_saas_url(value: str, environment: str) -> str:
     allowed = {"https"} if environment.lower() != "development" else {"http", "https"}
     if parsed.scheme not in allowed:
         requirement = "HTTPS" if environment.lower() != "development" else "HTTP or HTTPS"
-        raise SaaSConfigurationError(f"PEKA SaaS URL must use {requirement}")
+        raise SaaSConfigurationError(f"PEKA URL must use {requirement}")
     if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise SaaSConfigurationError("PEKA SaaS URL must be an origin without credentials or query")
+        raise SaaSConfigurationError("PEKA URL must be an origin without credentials or query")
     return value
 
 
@@ -81,7 +81,6 @@ class RegistrationService:
         self,
         saas_url: str,
         registration_token: str,
-        connector_name: str,
         actor: UserAccount | None,
         *,
         reregister: bool = False,
@@ -90,18 +89,28 @@ class RegistrationService:
         current = await self._operations.get_settings()
         if current.connector_id and (not reregister or not confirmed):
             raise ConfirmationRequiredError("Explicit confirmation is required to re-register")
+        connector_name = current.connector_display_name
         clean_url = validate_saas_url(saas_url, self._settings.environment)
         previous_state = current.saas_status
+        correlation_id = str(uuid4())
         await self._operations.record_event(
             "connector.registration_started",
-            "PEKA SaaS registration attempt started",
+            "PEKA registration attempt started",
             actor=actor,
             target_type="connector",
             target_id=current.instance_id,
-            details={"saas_hostname": urlsplit(clean_url).hostname, "reregister": reregister},
+            details={
+                "saas_hostname": urlsplit(clean_url).hostname,
+                "reregister": reregister,
+                "instance_id": current.instance_id,
+                "connector_name": connector_name,
+                "correlation_id": correlation_id,
+            },
             component="saas",
         )
-        current = await self._operations.begin_registration()
+        current = await self._operations.begin_registration(
+            clean_url if not current.connector_id else None
+        )
         try:
             response = await self._client.register_connector(
                 clean_url,
@@ -113,6 +122,7 @@ class RegistrationService:
                     instance_id=UUID(str(current.instance_id)),
                     capabilities=CAPABILITIES,
                 ),
+                correlation_id,
             )
             encrypted_secret = self._secrets.encrypt(response.connector_secret)
             registration_interval = (
@@ -127,17 +137,26 @@ class RegistrationService:
                 registration_interval,
                 response.registered_at,
                 clean_url,
-                connector_name,
             )
         except Exception as exc:
-            await self._operations.registration_failed(str(exc), previous_state)
+            client_error = exc if isinstance(exc, SaaSClientError) else None
+            public_error = str(client_error) if client_error else "Connector registration failed."
+            await self._operations.registration_failed(public_error, previous_state)
             await self._operations.record_event(
                 "connector.registration_failed",
-                "PEKA SaaS registration failed",
+                "PEKA registration failed",
                 actor=actor,
                 target_type="connector",
                 target_id=current.instance_id,
-                details={"error": str(exc), "reregister": reregister},
+                details={
+                    "error": public_error,
+                    "reregister": reregister,
+                    "instance_id": current.instance_id,
+                    "correlation_id": correlation_id,
+                    "request_id": client_error.request_id if client_error else None,
+                    "http_status": client_error.status_code if client_error else None,
+                    "saas_error_code": client_error.error_code if client_error else None,
+                },
                 level="ERROR",
                 component="saas",
             )
@@ -148,7 +167,14 @@ class RegistrationService:
             actor=actor,
             target_type="connector",
             target_id=str(response.connector_id),
-            details={"tenant_id": str(response.tenant_id), "reregister": reregister},
+            details={
+                "tenant_id": str(response.tenant_id),
+                "reregister": reregister,
+                "instance_id": current.instance_id,
+                "correlation_id": correlation_id,
+                "request_id": correlation_id,
+                "http_status": 201,
+            },
             component="saas",
         )
         await self._operations.record_event(
@@ -198,10 +224,12 @@ class HeartbeatService:
         operations: SqlAlchemyOperationsRepository,
         client: PEKASaaSClient,
         secrets: SecretEncryptionService,
+        environment: str,
     ) -> None:
         self._operations = operations
         self._client = client
         self._secrets = secrets
+        self._environment = environment
 
     async def send(self) -> HeartbeatDelivery:
         settings = await self._operations.get_settings()
@@ -218,6 +246,8 @@ class HeartbeatService:
         summary = SourceHeartbeatSummary(**(await self._operations.source_summary()))
         request = ConnectorHeartbeatRequest(
             instance_id=UUID(str(settings.instance_id)),
+            name=settings.connector_display_name,
+            environment=self._environment,
             connector_version=CONNECTOR_VERSION,
             timestamp=datetime.now(UTC),
             status="healthy",

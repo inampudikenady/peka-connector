@@ -5,13 +5,17 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { LEGACY_SOURCES_REDIRECT } from './components/navigationItems';
 import { ToastProvider } from './components/ToastProvider';
+import { ActivityPage } from './pages/ActivityPage';
 import { LoginPage } from './pages/LoginPage';
 import { SetupPage } from './pages/SetupPage';
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => ({ default: module.OverviewPage })));
-const SourcesPage = lazy(() => import('./pages/SourcesPage').then((module) => ({ default: module.SourcesPage })));
-const ActivityPage = lazy(() => import('./pages/ActivityPage').then((module) => ({ default: module.ActivityPage })));
+const DocumentsPage = lazy(() => import('./pages/DocumentsPage').then((module) => ({ default: module.DocumentsPage })));
+const CMDBPage = lazy(() => import('./pages/CMDBPage').then((module) => ({ default: module.CMDBPage })));
+const PrometheusPage = lazy(() => import('./pages/PrometheusPage').then((module) => ({ default: module.PrometheusPage })));
+const InventoryPage = lazy(() => import('./pages/InventoryPage').then((module) => ({ default: module.InventoryPage })));
 const LogsPage = lazy(() => import('./pages/LogsPage').then((module) => ({ default: module.LogsPage })));
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage').then((module) => ({ default: module.DiagnosticsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((module) => ({ default: module.UsersPage })));
@@ -27,7 +31,11 @@ function Application() {
   if (!user) return <LoginPage />;
   return <AppShell><Suspense fallback={<Box sx={{ display: 'grid', placeItems: 'center', py: 8 }}><CircularProgress /></Box>}><Routes>
     <Route path="/" element={<OverviewPage />} />
-    <Route path="/sources" element={<SourcesPage />} />
+    <Route path="/sources/*" element={<Navigate to={LEGACY_SOURCES_REDIRECT} replace />} />
+    <Route path="/documents" element={<DocumentsPage />} />
+    <Route path="/cmdb" element={<CMDBPage />} />
+    <Route path="/prometheus" element={<PrometheusPage />} />
+    <Route path="/inventory" element={<InventoryPage />} />
     <Route path="/activity" element={<ActivityPage />} />
     <Route path="/logs" element={<LogsPage />} />
     <Route path="/diagnostics" element={<DiagnosticsPage />} />

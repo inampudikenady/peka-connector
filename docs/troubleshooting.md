@@ -8,6 +8,7 @@
 - **Authentication Failed:** use Retry Now only after credentials are expected to be valid, or re-register with a new token. Automatic retries are intentionally slow.
 - **Out of Sync or Disconnected:** confirm network/TLS availability. Recovery is automatic after an accepted heartbeat; successful recovery resets the failure count.
 - **Encryption-key startup failure:** restore the exact deployment `PEKA_ENCRYPTION_KEY` associated with the `/data` backup. Do not generate a replacement key for existing ciphertext.
-- **Source Failed:** confirm its configured path is beneath `/data/sources`, is included by the read-only mount, and is readable by the container user.
+- **Source Failed:** confirm its configured path is beneath `/data/external-sources`, is included
+  by the read-only mount, and is readable by the container user.
 
 Download the sanitized diagnostics bundle from Diagnostics. It excludes all credentials, authorization headers, password hashes, document contents, and connector-secret ciphertext.

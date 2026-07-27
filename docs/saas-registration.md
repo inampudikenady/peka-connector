@@ -23,7 +23,7 @@ Registration errors are sanitized: 400 malformed input, 401 invalid token, 403 n
 
 ## Heartbeat contract
 
-The connector calls `POST /api/v1/connectors/{connector_id}/heartbeat` with bearer secret authentication and `X-PEKA-Connector-ID`. The payload contains only instance identity, version, UTC time, uptime, process status `healthy`, aggregate source health, and `filesystem_documents`. It never contains paths, filenames, users, document metadata/content, or secrets.
+The connector calls `POST /api/v1/connectors/{connector_id}/heartbeat` with bearer secret authentication and `X-PEKA-Connector-ID`. The payload contains only instance identity, the current appliance-owned connector name, deployment environment, version, UTC time, uptime, process status `healthy`, aggregate source health, and `filesystem_documents`. It never contains paths, filenames, users, document metadata/content, or secrets. The display name is edited only in General settings; a rename is sent immediately and retried by normal heartbeats without changing connector credentials or re-registering.
 
 The response is:
 

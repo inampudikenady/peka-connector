@@ -21,3 +21,9 @@ Discovery does not follow symlinks. It reads included file bytes only to calcula
 Enabled sources receive one UTC interval job. Create/update reconciles the interval, disable/delete removes it, and startup rebuilds jobs. Manual and scheduled runs share discovery/reconciliation; history identifies the trigger and overlapping runs are skipped.
 
 Future Prometheus, Loki, Zammad, ServiceNow, SharePoint, Confluence, and Jira packages can reuse registration and orchestration, but remain absent from the UI until implemented and tested. Non-document sources should introduce suitable domain records rather than forcing all data into document metadata.
+
+## Built-in managed documents
+
+The built-in source uses the normal `filesystem_documents` plugin type plus `system_managed=true`; there is no incompatible managed-only plugin type. It is absent from generic source lists and cannot be created, renamed, repathed, or deleted through customer APIs. Documents exposes only enabled state, bounded scan interval, Scan now, and health testing. Future external-source plugins may reuse delivery jobs, but must never delete customer source files automatically.
+
+Existing non-managed filesystem source rows are preserved as legacy records. They are not displayed in the simplified navigation and do not participate in managed document identity. A future migration experience can expose them when an associated source type is complete.

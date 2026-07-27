@@ -9,7 +9,12 @@ The first connector source must inventory documents from administrator-approved 
 
 ## Decision
 
-Implement a filesystem plugin supporting PDF, DOCX, TXT, and Markdown extensions. Restrict absolute readable directories to `/data/sources` or descendants, apply include/exclude globs, reject symlink escapes, do not follow discovery symlinks, and collect relative path, filename, extension, size, modification time, and SHA-256. Reconcile metadata with discovery/last-seen timestamps and active/missing state. Mount the generic customer source tree read-only in Docker.
+Implement a filesystem plugin supporting PDF, DOCX, TXT, and Markdown extensions. Restrict
+absolute readable directories to the configured external source root (`/data/external-sources` in
+Docker) or descendants, apply include/exclude globs, reject symlink escapes, do not follow
+discovery symlinks, and collect relative path, filename, extension, size, modification time, and
+SHA-256. Reconcile metadata with discovery/last-seen timestamps and active/missing state. Mount the
+generic customer source tree read-only in Docker.
 
 ## Consequences
 

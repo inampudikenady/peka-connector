@@ -1,37 +1,18 @@
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
-import DashboardOutlinedIcon from '@mui/icons-material/DashboardOutlined';
-import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
-import DnsOutlinedIcon from '@mui/icons-material/DnsOutlined';
 import FactCheckOutlinedIcon from '@mui/icons-material/FactCheckOutlined';
-import GroupOutlinedIcon from '@mui/icons-material/GroupOutlined';
-import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import MenuIcon from '@mui/icons-material/Menu';
-import MonitorHeartOutlinedIcon from '@mui/icons-material/MonitorHeartOutlined';
-import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
-import TimelineOutlinedIcon from '@mui/icons-material/TimelineOutlined';
 import {
   AppBar, Box, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon,
   ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography, useMediaQuery, useTheme,
 } from '@mui/material';
-import { useState, type PropsWithChildren, type ReactNode } from 'react';
+import { useState, type PropsWithChildren } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
 import { ChangePasswordDialog } from './ChangePasswordDialog';
+import { navigationItems } from './navigationItems';
 
 const drawerWidth = 240;
-interface NavItem { label: string; path: string; icon: ReactNode; adminOnly?: boolean }
-const items: NavItem[] = [
-  { label: 'Overview', path: '/', icon: <DashboardOutlinedIcon /> },
-  { label: 'Sources', path: '/sources', icon: <DnsOutlinedIcon /> },
-  { label: 'Activity', path: '/activity', icon: <TimelineOutlinedIcon /> },
-  { label: 'Logs', path: '/logs', icon: <DescriptionOutlinedIcon /> },
-  { label: 'Diagnostics', path: '/diagnostics', icon: <MonitorHeartOutlinedIcon /> },
-  { label: 'Users', path: '/users', icon: <GroupOutlinedIcon />, adminOnly: true },
-  { label: 'Settings', path: '/settings', icon: <SettingsOutlinedIcon /> },
-  { label: 'About', path: '/about', icon: <InfoOutlinedIcon /> },
-];
-
 export function AppShell({ children }: PropsWithChildren) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -42,7 +23,7 @@ export function AppShell({ children }: PropsWithChildren) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const drawer = <Box><Toolbar><FactCheckOutlinedIcon color="primary" sx={{ mr: 1 }} /><Typography fontWeight={800}>PEKA Connector</Typography></Toolbar><Divider />
-    <List>{items.filter((item) => !item.adminOnly || user?.role === 'administrator').map((item) => <ListItemButton key={item.path} selected={location.pathname === item.path} onClick={() => { navigate(item.path); setDrawerOpen(false); }}>
+    <List>{navigationItems.filter((item) => !item.adminOnly || user?.role === 'administrator').map((item) => <ListItemButton key={item.path} selected={location.pathname === item.path} onClick={() => { navigate(item.path); setDrawerOpen(false); }}>
       <ListItemIcon>{item.icon}</ListItemIcon><ListItemText primary={item.label} />
     </ListItemButton>)}</List></Box>;
   return <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'grey.50' }}>

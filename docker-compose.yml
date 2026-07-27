@@ -1,4 +1,29 @@
 services:
+  volume-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /data/state /data/config /data/logs /data/spool /data/sources
+        chown 10001:10001 /data /data/state /data/config /data/logs /data/spool /data/sources
+        chmod 0755 /data /data/sources
+        chmod 0700 /data/state /data/config /data/logs /data/spool
+        chown 10001:10001 /managed/documents /managed/cmdb
+        chmod 0700 /managed/documents /managed/cmdb
+    volumes:
+      - peka-data:/data
+      - connector_documents:/managed/documents
+      - connector_cmdb:/managed/cmdb
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
   connector:
     build:
       context: .
@@ -12,9 +37,15 @@ services:
       PEKA_BOOTSTRAP_ADMIN_USERNAME: ${PEKA_BOOTSTRAP_ADMIN_USERNAME:-}
       PEKA_BOOTSTRAP_ADMIN_PASSWORD: ${PEKA_BOOTSTRAP_ADMIN_PASSWORD:-}
       PEKA_LOG_LEVEL: ${PEKA_LOG_LEVEL:-INFO}
+      PEKA_EXTERNAL_SOURCES_ROOT: /data/external-sources
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - peka-data:/data
-      - ${PEKA_SOURCES_PATH:-./sources}:/data/sources:ro
+      - ${PEKA_SOURCES_PATH:-./sources}:/data/external-sources:ro
+      - connector_documents:/data/sources/documents
+      - connector_cmdb:/data/sources/cmdb
     ports:
       - "${PEKA_HTTP_PORT:-8080}:8080"
     read_only: true
@@ -25,3 +56,5 @@ services:
 
 volumes:
   peka-data:
+  connector_documents:
+  connector_cmdb:
