@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     document_job_max_attempts: int = Field(default=8, ge=1, le=100)
     cmdb_max_file_size_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     cmdb_max_row_count: int = Field(default=100_000, ge=1, le=1_000_000)
+    minimum_free_disk_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
 
     @field_validator("database_url")
     @classmethod
@@ -93,7 +94,15 @@ class Settings(BaseSettings):
         self.managed_cmdb_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.managed_cmdb_root.chmod(0o700)
 
+    @property
+    def trusted_ca_root(self) -> Path:
+        return self.data_root / "config" / "certificates"
+
+    def ensure_trusted_ca_directory(self) -> None:
+        self.trusted_ca_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.trusted_ca_root.chmod(0o700)
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]  # Values are supplied by PEKA_* at runtime.

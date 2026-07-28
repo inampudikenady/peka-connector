@@ -71,6 +71,8 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
     documents_root = settings.managed_documents_root
     documents_readable = documents_root.is_dir() and os.access(documents_root, os.R_OK)
     documents_writable = documents_root.is_dir() and os.access(documents_root, os.W_OK)
+    cmdb_root = settings.managed_cmdb_root
+    cmdb_writable = cmdb_root.is_dir() and os.access(cmdb_root, os.W_OK | os.X_OK)
     spool = settings.data_root / "spool"
     successful_delivery = await session.scalar(
         select(DocumentDeliveryJobModel.id)
@@ -115,6 +117,13 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
                     "Directory is readable and writable"
                     if documents_readable and documents_writable
                     else "Directory is not readable and writable"
+                ),
+            ),
+            DiagnosticCheck(
+                name="Managed CMDB directory",
+                status="healthy" if cmdb_writable else "unhealthy",
+                detail=(
+                    f"{cmdb_root} is writable" if cmdb_writable else f"{cmdb_root} is not writable"
                 ),
             ),
             DiagnosticCheck(
@@ -247,6 +256,7 @@ async def diagnostics(
         next_heartbeat_at=product.next_heartbeat_at,
         heartbeat_interval_seconds=product.heartbeat_interval_seconds,
         consecutive_failures=product.heartbeat_failure_count,
+        latest_heartbeat_failure_reason=product.last_heartbeat_error,
         heartbeat_round_trip_ms=product.heartbeat_round_trip_ms,
         scheduler_running=connector_scheduler.running,
         heartbeat_job_scheduled=connector_scheduler.heartbeat_scheduled,

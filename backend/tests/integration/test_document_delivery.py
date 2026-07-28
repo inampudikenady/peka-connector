@@ -15,7 +15,7 @@ from app.application.services.documents import (
     ManagedDocumentService,
 )
 from app.core.config import get_settings
-from app.domain.ports.saas import DocumentDeliveryResponse
+from app.domain.ports.saas import DocumentDeliveryResponse, SaaSClientError
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.models.document import (
     DocumentDeliveryJobModel,
@@ -48,6 +48,19 @@ class AcknowledgingClient:
             content_hash=metadata.content_hash,
             ingestion_status="RECEIVED",
         )
+
+
+class UnavailableClient:
+    async def deliver_document(
+        self,
+        _base_url: str,
+        _connector_id: UUID,
+        _connector_secret: str,
+        _metadata: Any,
+        _idempotency_key: str,
+        _file_path: Path | None,
+    ) -> DocumentDeliveryResponse:
+        raise SaaSClientError("transport", "PEKA is temporarily unavailable")
 
 
 async def _reset() -> None:
@@ -144,7 +157,75 @@ async def test_acknowledgement_marks_exact_version_uploaded() -> None:
         )
         assert job and job.state == "SUCCEEDED"
         assert job.spool_path and not await asyncio.to_thread(Path(job.spool_path).exists)
-    await asyncio.to_thread((settings.managed_documents_root / filename).unlink, missing_ok=True)
+        await service.delete(document.id)
+        await session.refresh(document)
+        assert document.deletion_requested
+        assert document.delivery_status == "PENDING_DELETE"
+        assert not (settings.managed_documents_root / filename).exists()
+        assert await worker.run_once()
+        await session.refresh(document)
+        assert document.delivery_status == "DELETED"
+        delete_job = await session.scalar(
+            select(DocumentDeliveryJobModel).where(
+                DocumentDeliveryJobModel.document_id == document.id,
+                DocumentDeliveryJobModel.operation == "DELETE",
+            )
+        )
+        assert delete_job and delete_job.state == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_saas_keeps_delete_tombstone_retryable() -> None:
+    await _reset()
+    settings = get_settings()
+    filename = f"delete-retry-{uuid4()}.txt"
+    encryption = SecretEncryptionService(settings.encryption_key)
+    async with session_factory() as session:
+        service = ManagedDocumentService(session, settings)
+        operations = SqlAlchemyOperationsRepository(session)
+        await operations.complete_registration(
+            str(uuid4()),
+            str(uuid4()),
+            encryption.encrypt("connector-secret"),
+            300,
+            datetime.now(UTC),
+            "https://peka.example.test",
+        )
+        upload = StarletteUploadFile(
+            filename=filename,
+            file=io.BytesIO(b"delete me later"),
+            headers=Headers({"content-type": "text/plain"}),
+        )
+        document = await service.upload(upload, 0)
+        acknowledging = DocumentDeliveryWorker(
+            session,
+            settings,
+            AcknowledgingClient(),
+            encryption,  # type: ignore[arg-type]
+        )
+        assert await acknowledging.run_once()
+        await service.delete(document.id)
+
+        unavailable = DocumentDeliveryWorker(
+            session,
+            settings,
+            UnavailableClient(),
+            encryption,  # type: ignore[arg-type]
+        )
+        assert await unavailable.run_once()
+        await session.refresh(document)
+        assert document.deletion_requested
+        assert document.deleted_at is not None
+        delete_job = await session.scalar(
+            select(DocumentDeliveryJobModel).where(
+                DocumentDeliveryJobModel.document_id == document.id,
+                DocumentDeliveryJobModel.operation == "DELETE",
+            )
+        )
+        assert delete_job
+        assert delete_job.state == "FAILED_RETRYABLE"
+        assert delete_job.next_retry_at is not None
+        assert document.delivery_status == "FAILED"
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import re
 import shutil
 import unicodedata
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid4
@@ -58,6 +59,16 @@ class DocumentError(Exception):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class DocumentDeleteEligibility:
+    can_delete: bool
+    code: str | None = None
+    reason: str | None = None
+    status_code: int = 409
+    deletion_in_progress: bool = False
+    ownership_changed: bool = False
 
 
 def _safe_relative_path(value: str) -> str:
@@ -288,9 +299,20 @@ class ManagedDocumentService:
             finally:
                 probe.unlink(missing_ok=True)
 
-    async def list_page(self, page: int, page_size: int) -> tuple[list[DocumentModel], int]:
+    async def list_page(
+        self, page: int, page_size: int, *, show_deleted: bool = False
+    ) -> tuple[list[DocumentModel], int]:
         source = await self.source()
         condition = DocumentModel.source_id == source.id
+        if not show_deleted:
+            condition = and_(
+                condition,
+                DocumentModel.deleted_at.is_(None),
+                DocumentModel.deletion_requested.is_(False),
+                DocumentModel.state.notin_(["deleted", "tombstoned", "missing"]),
+                DocumentModel.local_status != "DELETED",
+                DocumentModel.delivery_status != "DELETED",
+            )
         total = int(
             await self._session.scalar(select(func.count(DocumentModel.id)).where(condition)) or 0
         )
@@ -301,7 +323,9 @@ class ManagedDocumentService:
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
-        return list(rows.all()), total
+        documents = list(rows.all())
+        await self.prepare_for_response(documents)
+        return documents, total
 
     async def get(self, document_id: UUID) -> DocumentModel:
         source = await self.source()
@@ -309,6 +333,172 @@ class ManagedDocumentService:
         if document is None or document.source_id != source.id:
             raise DocumentError("DOCUMENT_NOT_FOUND", "Document not found.", 404)
         return document
+
+    async def prepare_for_response(self, documents: list[DocumentModel]) -> list[DocumentModel]:
+        if not documents:
+            return documents
+        source = await self.source()
+        product = await self._operations.get_settings()
+        registration_history_matches = await self._registration_history_matches(product)
+        ownership_changed = False
+        for document in documents:
+            eligibility = self._delete_eligibility(
+                document,
+                source,
+                product,
+                registration_history_matches,
+                backfill=True,
+            )
+            document.can_delete = eligibility.can_delete
+            document.delete_unavailable_reason = eligibility.reason
+            document.deletion_in_progress = eligibility.deletion_in_progress
+            ownership_changed = ownership_changed or eligibility.ownership_changed
+        if ownership_changed:
+            await self._session.commit()
+        return documents
+
+    async def _registration_history_matches(self, product: object) -> bool:
+        connector_id = getattr(product, "connector_id", None)
+        tenant_id = getattr(product, "tenant_id", None)
+        if not connector_id or not tenant_id:
+            return False
+        events = list(
+            (
+                await self._session.scalars(
+                    select(AuditEventModel).where(
+                        AuditEventModel.event_type == "connector.registration_succeeded"
+                    )
+                )
+            ).all()
+        )
+        return all(
+            (not event.target_id or event.target_id == connector_id)
+            and (not event.details.get("tenant_id") or str(event.details["tenant_id"]) == tenant_id)
+            for event in events
+        )
+
+    def _delete_eligibility(
+        self,
+        document: DocumentModel,
+        source: SourceModel,
+        product: object,
+        registration_history_matches: bool,
+        *,
+        backfill: bool,
+    ) -> DocumentDeleteEligibility:
+        if document.delivery_status == "DELETED":
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_ALREADY_DELETED",
+                "This document has already been deleted.",
+            )
+        if document.deletion_requested or document.deleted_at:
+            return DocumentDeleteEligibility(
+                False,
+                "DELETE_ALREADY_PENDING",
+                "Document deletion is already in progress.",
+                deletion_in_progress=True,
+            )
+        if document.state.casefold() in {"deleted", "tombstoned"}:
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_ALREADY_DELETED",
+                "This document has already been deleted.",
+            )
+        if document.state.casefold() == "missing":
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_ALREADY_REMOVED",
+                "The local document has already been removed.",
+            )
+        try:
+            relative_path = _safe_relative_path(document.relative_path)
+        except DocumentError:
+            return DocumentDeleteEligibility(
+                False,
+                "INVALID_DOCUMENT_RECORD",
+                "Document ownership cannot be safely established.",
+                422,
+            )
+        target = self._root / relative_path
+        try:
+            resolved_parent = target.parent.resolve()
+        except OSError:
+            return DocumentDeleteEligibility(
+                False,
+                "INVALID_DOCUMENT_RECORD",
+                "Document ownership cannot be safely established.",
+                422,
+            )
+        if (
+            document.source_id != source.id
+            or self._root.resolve() not in (resolved_parent, *resolved_parent.parents)
+            or target.is_symlink()
+        ):
+            return DocumentDeleteEligibility(
+                False,
+                "INVALID_DOCUMENT_OWNERSHIP",
+                "Document ownership cannot be safely established.",
+                422,
+            )
+
+        current_instance_id = str(getattr(product, "instance_id", "") or "")
+        current_connector_id = str(getattr(product, "connector_id", "") or "")
+        current_tenant_id = str(getattr(product, "tenant_id", "") or "")
+        if document.owner_instance_id and document.owner_instance_id != current_instance_id:
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_CONNECTOR_MISMATCH",
+                "This document belongs to another connector.",
+                403,
+            )
+        if document.owner_connector_id and document.owner_connector_id != current_connector_id:
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_CONNECTOR_MISMATCH",
+                "This document belongs to another connector.",
+                403,
+            )
+        if document.owner_tenant_id and document.owner_tenant_id != current_tenant_id:
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_TENANT_MISMATCH",
+                "This document belongs to another tenant.",
+                403,
+            )
+
+        ownership_changed = False
+        if not document.owner_instance_id and current_instance_id and backfill:
+            document.owner_instance_id = current_instance_id
+            ownership_changed = True
+        missing_remote_ownership = not document.owner_connector_id or not document.owner_tenant_id
+        if missing_remote_ownership:
+            if (
+                not current_connector_id
+                or not current_tenant_id
+                or not registration_history_matches
+            ):
+                return DocumentDeleteEligibility(
+                    False,
+                    "INVALID_DOCUMENT_OWNERSHIP",
+                    "Document ownership cannot be safely established.",
+                    422,
+                    ownership_changed=ownership_changed,
+                )
+            if backfill:
+                document.owner_connector_id = current_connector_id
+                document.owner_tenant_id = current_tenant_id
+                ownership_changed = True
+
+        if not target.is_file():
+            return DocumentDeleteEligibility(
+                False,
+                "DOCUMENT_ALREADY_REMOVED",
+                "The local document has already been removed.",
+                409,
+                ownership_changed=ownership_changed,
+            )
+        return DocumentDeleteEligibility(True, ownership_changed=ownership_changed)
 
     async def upload(self, upload: UploadFile, batch_bytes: int) -> DocumentModel:
         source = await self.source()
@@ -387,6 +577,7 @@ class ManagedDocumentService:
         self, relative_path: str, path: Path, content_hash: str, mime: str, entry_method: str
     ) -> DocumentModel:
         source = await self.source()
+        product = await self._operations.get_settings()
         relative_path = _safe_relative_path(relative_path)
         stat = await asyncio.to_thread(path.stat)
         now = datetime.now(UTC)
@@ -420,6 +611,9 @@ class ManagedDocumentService:
                 state="active",
                 stable_since_at=now,
                 entry_method=entry_method,
+                owner_instance_id=product.instance_id,
+                owner_connector_id=product.connector_id,
+                owner_tenant_id=product.tenant_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -514,7 +708,7 @@ class ManagedDocumentService:
         )
         self._session.add(job)
         document.local_status = "QUEUED" if operation == "UPSERT" else "DELETED"
-        document.delivery_status = "QUEUED"
+        document.delivery_status = "QUEUED" if operation == "UPSERT" else "PENDING_DELETE"
         await self._session.commit()
         await self._operations.record_event(
             "document.queued",
@@ -682,17 +876,51 @@ class ManagedDocumentService:
 
     async def delete(self, document_id: UUID) -> None:
         document = await self.get(document_id)
+        source = await self.source()
+        product = await self._operations.get_settings()
+        eligibility = self._delete_eligibility(
+            document,
+            source,
+            product,
+            await self._registration_history_matches(product),
+            backfill=True,
+        )
+        if eligibility.ownership_changed:
+            await self._session.commit()
+        if not eligibility.can_delete:
+            safe_document_id = str(document.id)[:8]
+            safe_connector_id = str(product.connector_id or product.instance_id or "unknown")[:8]
+            reason = eligibility.reason or "Document deletion was rejected."
+            logger.warning(
+                "Document deletion rejected: document=%s connector=%s status=%s reason=%s",
+                safe_document_id,
+                safe_connector_id,
+                document.delivery_status,
+                reason,
+            )
+            await self._operations.record_event(
+                "document.deletion_rejected",
+                f"Document deletion was rejected: {reason}",
+                target_type="document",
+                target_id=safe_document_id,
+                details={
+                    "connector_id": safe_connector_id,
+                    "document_status": document.delivery_status,
+                    "reason": eligibility.code,
+                },
+                level="WARNING",
+                component="documents",
+            )
+            raise DocumentError(
+                eligibility.code or "DOCUMENT_DELETE_REJECTED",
+                reason,
+                eligibility.status_code,
+            )
         await self._request_delete(document, remove_file=True)
 
     async def _request_delete(self, document: DocumentModel, remove_file: bool) -> None:
         if document.deletion_requested:
             return
-        if remove_file and document.entry_method != "UI_UPLOAD":
-            raise DocumentError(
-                "PATH_NOT_ALLOWED",
-                "Files copied into the managed directory must be removed at their source.",
-                409,
-            )
         if remove_file:
             target = self._root / document.relative_path
             resolved_parent = target.parent.resolve()
@@ -755,7 +983,7 @@ class ManagedDocumentService:
         job.next_retry_at = datetime.now(UTC)
         job.error_code = None
         job.error_message = None
-        document.delivery_status = "QUEUED"
+        document.delivery_status = "QUEUED" if job.operation == "UPSERT" else "PENDING_DELETE"
         document.local_status = "QUEUED" if job.operation == "UPSERT" else "DELETED"
         await self._session.commit()
         await self._operations.record_event(

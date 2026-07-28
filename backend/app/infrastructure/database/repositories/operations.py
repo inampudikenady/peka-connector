@@ -122,22 +122,12 @@ class SqlAlchemyOperationsRepository:
             model.instance_id = str(uuid4())
             await self._session.commit()
             await self._session.refresh(model)
-        unhealthy_sources = int(
-            await self._session.scalar(
-                select(func.count(SourceModel.id)).where(
-                    SourceModel.enabled.is_(True),
-                    SourceModel.health_status != "healthy",
-                )
-            )
-            or 0
-        )
         derived = derive_connection_state(
             has_credentials=bool(model.connector_id and model.encrypted_connector_secret),
             current_state=model.saas_status,
             last_success_at=model.last_heartbeat_at,
             heartbeat_interval_seconds=model.heartbeat_interval_seconds,
             consecutive_failures=model.heartbeat_failure_count,
-            unhealthy_sources=unhealthy_sources,
         ).value
         if model.saas_status != derived:
             model.saas_status = derived
@@ -247,8 +237,7 @@ class SqlAlchemyOperationsRepository:
         model.heartbeat_interval_seconds = interval_seconds
         model.heartbeat_round_trip_ms = round_trip_ms
         model.last_saas_server_time = server_time
-        summary = await self.source_summary()
-        model.saas_status = "degraded" if summary["unhealthy"] else "connected"
+        model.saas_status = "connected"
         await self._session.commit()
         return model.saas_status
 
@@ -262,14 +251,12 @@ class SqlAlchemyOperationsRepository:
         model.last_heartbeat_status = "failed"
         model.last_heartbeat_error = str(sanitize(error))[:2000]
         state_hint = "authentication_failed" if authentication_failure else model.saas_status
-        summary = await self.source_summary()
         model.saas_status = derive_connection_state(
             has_credentials=True,
             current_state=state_hint,
             last_success_at=model.last_heartbeat_at,
             heartbeat_interval_seconds=model.heartbeat_interval_seconds,
             consecutive_failures=model.heartbeat_failure_count,
-            unhealthy_sources=summary["unhealthy"],
         ).value
         await self._session.commit()
         return model.heartbeat_failure_count
@@ -350,6 +337,7 @@ class SqlAlchemyOperationsRepository:
             "last_heartbeat_at": settings.last_heartbeat_at,
             "next_heartbeat_at": settings.next_heartbeat_at,
             "heartbeat_failure_count": settings.heartbeat_failure_count,
+            "last_heartbeat_error": settings.last_heartbeat_error,
             "saas_url": settings.saas_url,
             "registered_at": settings.registered_at,
             "last_heartbeat_attempt_at": settings.last_heartbeat_attempt_at,

@@ -76,6 +76,32 @@ async def test(
     return {**result, "correlation_id": correlation_id}
 
 
+@router.post("/configurations/{configuration_id}/diagnostics")
+async def diagnostics(
+    configuration_id: UUID,
+    actor: Administrator,
+    service: PrometheusServiceDep,
+    operations: OperationsDep,
+) -> dict[str, Any]:
+    correlation_id = str(uuid4())
+    result = await service.diagnose(configuration_id)
+    await operations.record_event(
+        "prometheus.connection_diagnostics",
+        "Prometheus layered connection diagnostics completed",
+        actor=actor,
+        target_type="prometheus_configuration",
+        target_id=str(configuration_id),
+        details={
+            "correlation_id": correlation_id,
+            "success": result["success"],
+            "stages": result["stages"],
+        },
+        level="INFO" if result["success"] else "WARNING",
+        component="prometheus",
+    )
+    return {**result, "correlation_id": correlation_id}
+
+
 @router.post("/configurations/{configuration_id}/scan")
 async def scan(
     configuration_id: UUID,

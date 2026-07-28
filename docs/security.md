@@ -49,7 +49,13 @@ The current in-memory rate limiter is appropriate for the single-process applian
 
 ## Connector credentials
 
-`PEKA_ENCRYPTION_KEY` is a required production bootstrap secret independent of the JWT key. It is never generated silently, persisted, returned by an API, logged, or included in diagnostics. The application derives an AES-256 key and uses AES-GCM with a random nonce and associated data. SQLite stores only versioned ciphertext and an encrypted validation marker. Startup validates the marker and any stored connector credential; a missing or changed key fails safely before serving traffic. Operators must preserve the key in their deployment secret manager through container replacement and database restore.
+The connector generates independent JWT and encryption secrets on first start. They are persisted
+outside SQLite in `/data/config/secrets`, owned by UID 10001, and readable only by that user.
+Existing environment-provided secrets are imported once when upgrading an existing deployment so
+previous ciphertext remains readable. The application derives an AES-256 key and uses AES-GCM with
+a random nonce and associated data. SQLite stores only versioned ciphertext and an encrypted
+validation marker. Startup validates the marker and stored connector credentials. Backups must
+include the persistent `/data/config/secrets` files together with `/data/state`.
 
 The one-time registration token exists only in request memory. The returned connector secret is decrypted only for heartbeat authorization. Client error messages are centrally mapped and sanitized; authorization headers and secret values never enter structured contexts.
 

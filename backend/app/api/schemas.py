@@ -181,6 +181,7 @@ class ManagedDocumentResponse(BaseModel):
     discovered_at: datetime
     first_seen_at: datetime
     last_seen_at: datetime
+    state: str
     local_status: str
     delivery_status: str
     upload_attempt_count: int
@@ -194,6 +195,9 @@ class ManagedDocumentResponse(BaseModel):
     updated_at: datetime
     deleted_at: datetime | None
     entry_method: str
+    can_delete: bool
+    delete_unavailable_reason: str | None
+    deletion_in_progress: bool
 
 
 class PaginatedManagedDocumentsResponse(BaseModel):
@@ -365,6 +369,7 @@ class OverviewResponse(BaseModel):
     tenant_id: str | None
     next_heartbeat_at: datetime | None
     heartbeat_failure_count: int
+    last_heartbeat_error: str | None
     saas_url: str | None
     registered_at: datetime | None
     last_heartbeat_attempt_at: datetime | None
@@ -428,6 +433,7 @@ class DiagnosticsResponse(BaseModel):
     next_heartbeat_at: datetime | None
     heartbeat_interval_seconds: int
     consecutive_failures: int
+    latest_heartbeat_failure_reason: str | None
     heartbeat_round_trip_ms: float | None
     scheduler_running: bool
     heartbeat_job_scheduled: bool

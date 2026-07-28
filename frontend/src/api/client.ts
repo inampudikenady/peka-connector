@@ -2,6 +2,7 @@ import type {
   CurrentUser, Diagnostics, LocalUser, LoginResponse, Overview, PaginatedActivity,
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
   CMDBDataset, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
+  PrometheusDiagnostics, TrustedCertificateAuthority,
 } from './types';
 
 let accessToken: string | null = null;
@@ -111,7 +112,7 @@ export const api = {
   scanSource: (id: string): Promise<ScanRecord> => request(`/sources/${id}/scan`, { method: 'POST' }),
   scanHistory: (id: string, page = 1): Promise<PaginatedScans> => request(`/sources/${id}/scans?page=${page}&page_size=20`),
   scanDetail: (sourceId: string, scanId: string): Promise<ScanDetail> => request(`/sources/${sourceId}/scans/${scanId}`),
-  documents: (page = 1): Promise<PaginatedManagedDocuments> => request(`/documents?page=${page}&page_size=25`),
+  documents: (page = 1, showDeleted = false): Promise<PaginatedManagedDocuments> => request(`/documents?page=${page}&page_size=25&show_deleted=${showDeleted}`),
   documentSource: (): Promise<ManagedDocumentSource> => request('/documents/source'),
   updateDocumentSource: (enabled: boolean, scanIntervalSeconds: number): Promise<ManagedDocumentSource> => request('/documents/source', { method: 'PUT', body: JSON.stringify({ enabled, scan_interval_seconds: scanIntervalSeconds }) }),
   testDocumentSource: (): Promise<ManagedDocumentSource> => request('/documents/source/test', { method: 'POST' }),
@@ -167,6 +168,7 @@ export const api = {
   createPrometheusConfiguration: (body: object): Promise<PrometheusConfiguration> => request('/prometheus/configurations', { method: 'POST', body: JSON.stringify(body) }),
   updatePrometheusConfiguration: (id: string, body: object): Promise<PrometheusConfiguration> => request(`/prometheus/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   testPrometheus: (id: string): Promise<{ message: string }> => request(`/prometheus/configurations/${id}/test`, { method: 'POST' }),
+  diagnosePrometheus: (id: string): Promise<PrometheusDiagnostics> => request(`/prometheus/configurations/${id}/diagnostics`, { method: 'POST' }),
   scanPrometheus: (id: string): Promise<{ target_count: number }> => request(`/prometheus/configurations/${id}/scan`, { method: 'POST' }),
   inventory: (query: string): Promise<PaginatedInventory> => request(`/inventory?${query}`),
   inventoryDetail: (id: string): Promise<InventoryDetail> => request(`/inventory/${id}`),
@@ -184,4 +186,26 @@ export const api = {
   reregisterSaas: (body: { saas_url: string; registration_token: string; confirmed: boolean }): Promise<ProductSettings> => request('/settings/saas/reregister', { method: 'POST', body: JSON.stringify(body) }),
   unregisterSaas: (): Promise<ProductSettings> => request('/settings/saas/unregister', { method: 'POST', body: JSON.stringify({ confirmed: true }) }),
   retryHeartbeat: (): Promise<ProductSettings> => request('/settings/saas/retry', { method: 'POST' }),
+  trustedCertificates: (): Promise<TrustedCertificateAuthority[]> => request('/settings/certificates'),
+  async uploadTrustedCertificate(name: string, file: File): Promise<TrustedCertificateAuthority> {
+    const form = new FormData(); form.append('name', name); form.append('file', file, file.name);
+    let response = await fetch('/api/v1/settings/certificates', {
+      method: 'POST', credentials: 'same-origin',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+      body: form,
+    });
+    if (response.status === 401 && await refreshAccessToken()) {
+      response = await fetch('/api/v1/settings/certificates', {
+        method: 'POST', credentials: 'same-origin',
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+        body: form,
+      });
+    }
+    if (!response.ok) throw await parseError(response);
+    return response.json() as Promise<TrustedCertificateAuthority>;
+  },
+  setTrustedCertificateState: (id: string, enabled: boolean): Promise<TrustedCertificateAuthority> =>
+    request(`/settings/certificates/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  deleteTrustedCertificate: (id: string): Promise<void> =>
+    request(`/settings/certificates/${id}`, { method: 'DELETE' }),
 };

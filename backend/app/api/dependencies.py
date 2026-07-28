@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.auth import AuthenticationService
+from app.application.services.certificates import TrustedCertificateService
 from app.application.services.cmdb import CMDBService
 from app.application.services.documents import ManagedDocumentService
 from app.application.services.inventory import InventoryService
@@ -67,12 +68,18 @@ def get_cmdb_service(session: SessionDep, settings: SettingsDep) -> CMDBService:
     return CMDBService(session, settings)
 
 
+def get_certificate_service(
+    session: SessionDep, settings: SettingsDep
+) -> TrustedCertificateService:
+    return TrustedCertificateService(session, settings)
+
+
 def get_inventory_service(session: SessionDep) -> InventoryService:
     return InventoryService(session)
 
 
 def get_prometheus_service(session: SessionDep, settings: SettingsDep) -> PrometheusService:
-    return PrometheusService(session, SecretEncryptionService(settings.encryption_key))
+    return PrometheusService(session, SecretEncryptionService(settings.encryption_key), settings)
 
 
 def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
@@ -133,6 +140,7 @@ UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 OperationsDep = Annotated[SqlAlchemyOperationsRepository, Depends(get_operations_repository)]
 DocumentServiceDep = Annotated[ManagedDocumentService, Depends(get_document_service)]
 CMDBServiceDep = Annotated[CMDBService, Depends(get_cmdb_service)]
+CertificateServiceDep = Annotated[TrustedCertificateService, Depends(get_certificate_service)]
 InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
 PrometheusServiceDep = Annotated[PrometheusService, Depends(get_prometheus_service)]
 RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

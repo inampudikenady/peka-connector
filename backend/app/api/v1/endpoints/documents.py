@@ -143,8 +143,9 @@ async def list_documents(
     service: DocumentServiceDep,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
+    show_deleted: bool = Query(default=False),
 ) -> PaginatedManagedDocumentsResponse:
-    items, total = await service.list_page(page, page_size)
+    items, total = await service.list_page(page, page_size, show_deleted=show_deleted)
     return PaginatedManagedDocumentsResponse(
         items=[ManagedDocumentResponse.model_validate(item) for item in items],
         total=total,
@@ -157,7 +158,9 @@ async def list_documents(
 async def get_document(
     document_id: UUID, _: CurrentUser, service: DocumentServiceDep
 ) -> ManagedDocumentResponse:
-    return ManagedDocumentResponse.model_validate(await service.get(document_id))
+    document = await service.get(document_id)
+    await service.prepare_for_response([document])
+    return ManagedDocumentResponse.model_validate(document)
 
 
 @router.post("/upload", response_model=DocumentUploadBatchResponse)
@@ -177,6 +180,7 @@ async def upload_documents(
     for upload in files:
         try:
             document = await service.upload(upload, batch_bytes)
+            await service.prepare_for_response([document])
             batch_bytes += document.size_bytes
             results.append(
                 DocumentUploadResult(

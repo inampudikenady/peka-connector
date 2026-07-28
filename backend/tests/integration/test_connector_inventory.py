@@ -2,9 +2,14 @@ import asyncio
 import io
 import zipfile
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
 from app.application.services.prometheus import PrometheusService
@@ -125,6 +130,51 @@ def _xlsx() -> bytes:
             </sheetData></worksheet>""",
         )
     return buffer.getvalue()
+
+
+def _ca_certificate() -> bytes:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "PEKA Test Root CA")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(minutes=1))
+        .not_valid_after(datetime.now(UTC) + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return certificate.public_bytes(serialization.Encoding.PEM)
+
+
+def test_trusted_ca_lifecycle(client: TestClient) -> None:
+    headers = _headers(client)
+    uploaded = client.post(
+        "/api/v1/settings/certificates",
+        headers=headers,
+        data={"name": "Private Prometheus CA"},
+        files={"file": ("prometheus-ca.pem", _ca_certificate(), "application/x-pem-file")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    certificate = uploaded.json()
+    assert certificate["subject"] == "CN=PEKA Test Root CA"
+    assert certificate["enabled"] is True
+
+    disabled = client.put(
+        f"/api/v1/settings/certificates/{certificate['id']}",
+        headers=headers,
+        json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert (
+        client.delete(
+            f"/api/v1/settings/certificates/{certificate['id']}", headers=headers
+        ).status_code
+        == 204
+    )
 
 
 def test_csv_import_replacement_inventory_and_roles(client: TestClient) -> None:
@@ -291,6 +341,9 @@ def test_prometheus_collection_exact_match_and_manual_decision_persistence(
     assert inventory["items"][0]["prometheus_health"] == "healthy"
 
     detail = client.get(f"/api/v1/inventory/{inventory['items'][0]['id']}", headers=headers).json()
+    assert detail["services"][0]["service_type"] == "node_exporter"
+    assert detail["services"][0]["port"] == 9100
+    assert detail["dependencies"][0]["relation_type"] == "scraped_by"
     observation = next(
         item for item in detail["observations"] if item["source_type"] == "prometheus"
     )

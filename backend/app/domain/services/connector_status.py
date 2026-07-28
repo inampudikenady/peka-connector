@@ -21,7 +21,7 @@ def derive_connection_state(
     last_success_at: datetime | None,
     heartbeat_interval_seconds: int,
     consecutive_failures: int,
-    unhealthy_sources: int,
+    unhealthy_sources: int = 0,
     now: datetime | None = None,
 ) -> ConnectorConnectionState:
     if not has_credentials:
@@ -49,6 +49,8 @@ def derive_connection_state(
         return ConnectorConnectionState.OUT_OF_SYNC
     if consecutive_failures:
         return ConnectorConnectionState.RECONNECTING
-    if unhealthy_sources:
-        return ConnectorConnectionState.DEGRADED
+    # Source health is intentionally not part of connector-to-PEKA
+    # connectivity. Keep the argument for API compatibility with callers that
+    # also calculate a source summary, but report that summary independently.
+    _ = unhealthy_sources
     return ConnectorConnectionState.CONNECTED

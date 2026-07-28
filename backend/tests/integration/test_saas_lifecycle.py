@@ -160,18 +160,29 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
         assert renamed.tenant_id == tenant_id
         assert renamed.instance_id == instance_id
 
-        client.heartbeat_error = SaaSClientError("http_error", "Credentials rejected", 401)
+        client.heartbeat_error = SaaSClientError(
+            "authentication",
+            "POST /api/v1/connectors/<redacted>/heartbeat returned HTTP 401",
+            401,
+            failure_reason="Authentication rejected by PEKA",
+        )
         with pytest.raises(SaaSClientError):
             await heartbeat.send()
         product = await operations.get_settings()
         assert product.saas_status == "authentication_failed"
         assert product.heartbeat_failure_count == 1
+        assert product.last_heartbeat_error == "Authentication rejected by PEKA"
+        assert (await operations.overview())["last_heartbeat_error"] == (
+            "Authentication rejected by PEKA"
+        )
 
         client.heartbeat_error = None
         await heartbeat.send()
         product = await operations.get_settings()
         assert product.saas_status == "connected"
         assert product.heartbeat_failure_count == 0
+        assert product.last_heartbeat_error is None
+        assert (await operations.overview())["last_heartbeat_error"] is None
 
         stored = await session.scalar(
             select(ProductSettingsModel).where(ProductSettingsModel.id == 1)

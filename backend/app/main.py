@@ -19,6 +19,7 @@ from app.application.services.auth import (
     InvalidRefreshTokenError,
     SetupUnavailableError,
 )
+from app.application.services.certificates import CertificateError
 from app.application.services.cmdb import CMDBError
 from app.application.services.documents import DocumentError, ManagedDocumentService
 from app.application.services.prometheus import PrometheusError
@@ -245,6 +246,14 @@ async def document_error(_: Request, exc: DocumentError) -> JSONResponse:
 
 @app.exception_handler(CMDBError)
 async def cmdb_error(_: Request, exc: CMDBError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(CertificateError)
+async def certificate_error(_: Request, exc: CertificateError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": str(exc), "detail": str(exc)},

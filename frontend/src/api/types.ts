@@ -30,6 +30,20 @@ export interface PrometheusConfiguration {
   scan_interval_seconds: number; enabled: boolean; last_successful_scan_at: string | null;
   last_failed_scan_at: string | null; last_error: string | null; target_count: number;
   healthy_target_count: number; unhealthy_target_count: number;
+  warnings: string[];
+}
+export interface PrometheusDiagnosticStage {
+  stage: 'DNS' | 'TCP' | 'TLS' | 'HTTP'; status: 'success' | 'failed';
+  code?: string; message: string; duration_ms: number;
+}
+export interface PrometheusDiagnostics {
+  success: boolean; stages: PrometheusDiagnosticStage[]; warnings: string[];
+  correlation_id: string;
+}
+export interface TrustedCertificateAuthority {
+  id: string; name: string; original_filename: string; fingerprint_sha256: string;
+  subject: string; issuer: string; not_valid_before: string; not_valid_after: string;
+  expired: boolean; enabled: boolean; created_at: string;
 }
 export interface InventoryItem {
   id: string; canonical_name: string; hostname: string | null; fqdn: string | null;
@@ -45,6 +59,8 @@ export interface InventoryDetail {
   observations: Array<{ id: string; source_type: string; status: string; observed_fields: Record<string, unknown>; raw_reference: string; first_seen_at: string; last_seen_at: string }>;
   identities: Array<{ identity_type: string; original_value: string; normalized_value: string; source_type: string }>;
   conflicts: Array<{ id: string; field_name: string; source_values: Record<string, unknown>; resolution_status: string }>;
+  services: Array<{ id: string; service_type: string; name: string; protocol: string; port: number; path: string; endpoint: string; first_seen_at: string; last_seen_at: string }>;
+  dependencies: Array<{ id: string; relation_type: string; target_asset_id: string | null; target_reference: string; evidence: string; first_seen_at: string; last_seen_at: string }>;
 }
 
 export interface SourceConfiguration {
@@ -110,6 +126,7 @@ export interface Overview {
   recent_events: ActivityEvent[]; storage_total_bytes: number | null; storage_free_bytes: number | null;
   connector_display_name: string; instance_id: string; connector_id: string | null; tenant_id: string | null;
   next_heartbeat_at: string | null; heartbeat_failure_count: number;
+  last_heartbeat_error: string | null;
   saas_url: string | null; registered_at: string | null; last_heartbeat_attempt_at: string | null;
   heartbeat_interval_seconds: number; heartbeat_round_trip_ms: number | null;
   scheduler_running: boolean; heartbeat_job_scheduled: boolean; source_scheduler_job_count: number;
@@ -127,6 +144,7 @@ export interface Diagnostics {
   instance_id: string; registration_state: string; connection_state: string; saas_hostname: string | null;
   last_heartbeat_attempt_at: string | null; last_successful_heartbeat_at: string | null;
   next_heartbeat_at: string | null; heartbeat_interval_seconds: number; consecutive_failures: number;
+  latest_heartbeat_failure_reason: string | null;
   heartbeat_round_trip_ms: number | null; scheduler_running: boolean;
   heartbeat_job_scheduled: boolean; source_scheduler_job_count: number;
   document_worker_running: boolean; document_reconciliation_scheduled: boolean;
@@ -155,11 +173,12 @@ export interface ManagedDocument {
   id: string; source_id: string; document_key: string; relative_path: string; filename: string;
   normalized_filename: string; extension: string; mime_type: string; size_bytes: number;
   content_hash: string; modified_at: string; discovered_at: string; first_seen_at: string;
-  last_seen_at: string; local_status: string; delivery_status: string; upload_attempt_count: number;
+  last_seen_at: string; state: string; local_status: string; delivery_status: string; upload_attempt_count: number;
   last_upload_attempt_at: string | null; uploaded_at: string | null;
   remote_document_id: string | null; remote_version_id: string | null;
   last_error_code: string | null; last_error_message: string | null;
   created_at: string; updated_at: string; deleted_at: string | null; entry_method: string;
+  can_delete: boolean; delete_unavailable_reason: string | null; deletion_in_progress: boolean;
 }
 
 export interface PaginatedManagedDocuments { items: ManagedDocument[]; total: number; page: number; page_size: number }

@@ -124,12 +124,22 @@ class SaaSClientError(Exception):
         *,
         error_code: str | None = None,
         request_id: str | None = None,
+        failure_reason: str | None = None,
+        method: str | None = None,
+        destination_host: str | None = None,
+        request_path: str | None = None,
+        safe_api_message: str | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status_code = status_code
         self.error_code = error_code
         self.request_id = request_id
+        self.failure_reason = failure_reason or message
+        self.method = method
+        self.destination_host = destination_host
+        self.request_path = request_path
+        self.safe_api_message = safe_api_message
 
     @property
     def authentication_failure(self) -> bool:

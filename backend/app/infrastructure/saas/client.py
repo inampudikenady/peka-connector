@@ -1,3 +1,4 @@
+import errno
 import json
 import re
 import socket
@@ -108,12 +109,18 @@ class HttpxPEKASaaSClient:
             except httpx.HTTPError as exc:
                 self._raise_transport(exc)
         if not response.is_success:
-            self._raise_status(response.status_code, "heartbeat")
+            self._raise_heartbeat_error(response)
         try:
             return ConnectorHeartbeatResponse.model_validate(response.json())
         except (ValidationError, ValueError) as exc:
             raise SaaSClientError(
-                "malformed_response", "PEKA returned an invalid heartbeat response"
+                "malformed_response",
+                "PEKA returned an unexpected response",
+                failure_reason="Unexpected heartbeat response",
+                method="POST",
+                destination_host=response.request.url.host,
+                request_path=self._safe_request_path(response.request.url.path),
+                request_id=self._safe_request_id(response),
             ) from exc
 
     async def deliver_document(
@@ -207,6 +214,105 @@ class HttpxPEKASaaSClient:
         raise SaaSClientError("http_error", message, status_code)
 
     @staticmethod
+    def _raise_heartbeat_error(response: httpx.Response) -> NoReturn:
+        status_code = response.status_code
+        error_code, safe_message = HttpxPEKASaaSClient._safe_api_error(response)
+        request_id = HttpxPEKASaaSClient._safe_request_id(response)
+        failure_reasons = {
+            400: "PEKA rejected the heartbeat request",
+            401: "Authentication rejected by PEKA",
+            403: "Authentication rejected by PEKA",
+            404: "PEKA endpoint not found",
+            409: "PEKA rejected the heartbeat conflict",
+            429: "PEKA rate limit reached",
+        }
+        failure_reason = failure_reasons.get(
+            status_code,
+            f"PEKA returned HTTP {status_code}",
+        )
+        kinds = {
+            400: "http_400",
+            401: "authentication",
+            403: "forbidden",
+            404: "not_found",
+            409: "conflict",
+            429: "rate_limited",
+        }
+        kind = kinds.get(
+            status_code,
+            "server_error" if status_code >= 500 else "http_error",
+        )
+        path = HttpxPEKASaaSClient._safe_request_path(response.request.url.path)
+        message = f"POST {path} returned HTTP {status_code}"
+        if error_code:
+            message += f", code={error_code}"
+        raise SaaSClientError(
+            kind,
+            message,
+            status_code,
+            error_code=error_code,
+            request_id=request_id,
+            failure_reason=failure_reason,
+            method="POST",
+            destination_host=response.request.url.host,
+            request_path=path,
+            safe_api_message=safe_message,
+        )
+
+    @staticmethod
+    def _safe_api_error(response: httpx.Response) -> tuple[str | None, str | None]:
+        try:
+            payload: Any = response.json()
+        except ValueError:
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        raw_code = payload.get("code", payload.get("error_code"))
+        code = (
+            raw_code
+            if isinstance(raw_code, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", raw_code)
+            else None
+        )
+        raw_message = payload.get("message", payload.get("detail"))
+        message = HttpxPEKASaaSClient._safe_remote_message(raw_message)
+        return code, message
+
+    @staticmethod
+    def _safe_remote_message(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        lower_value = value.casefold()
+        if "<" in value or ">" in value or "traceback" in lower_value:
+            return None
+        if re.search(
+            r"(?i)(authorization\s*:|bearer\s+\S+|connector_secret\s*[=:]|"
+            r"registration_token\s*[=:]|password\s*[=:]|token\s*[=:])",
+            value,
+        ):
+            return None
+        message = " ".join(value.split())[:300]
+        return message or None
+
+    @staticmethod
+    def _safe_request_id(response: httpx.Response) -> str | None:
+        value = (
+            response.headers.get("X-Request-ID")
+            or response.headers.get("X-Correlation-ID")
+            or response.headers.get("Request-ID")
+        )
+        if value and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", value):
+            return value
+        return None
+
+    @staticmethod
+    def _safe_request_path(path: str) -> str:
+        return re.sub(
+            r"(?<=/connectors/)[0-9a-fA-F-]{36}(?=/)",
+            "<redacted>",
+            path,
+        )
+
+    @staticmethod
     def _raise_registration_error(
         response: httpx.Response,
         registration_token: str,
@@ -290,15 +396,81 @@ class HttpxPEKASaaSClient:
 
     @staticmethod
     def _raise_transport(exc: httpx.HTTPError) -> NoReturn:
+        try:
+            request = exc.request
+        except RuntimeError:
+            request = None
+        host = request.url.host if request else None
+        method = request.method if request else None
+        path = HttpxPEKASaaSClient._safe_request_path(request.url.path) if request else None
+
+        def error(kind: str, message: str, reason: str) -> SaaSClientError:
+            return SaaSClientError(
+                kind,
+                message,
+                failure_reason=reason,
+                method=method,
+                destination_host=host,
+                request_path=path,
+            )
+
+        if isinstance(exc, httpx.ConnectTimeout):
+            raise error(
+                "connection_timeout",
+                f"Connection timed out while contacting {host or 'PEKA'}",
+                "Connection timed out",
+            ) from exc
+        if isinstance(exc, httpx.ReadTimeout):
+            raise error(
+                "read_timeout",
+                f"Timed out waiting for a response from {host or 'PEKA'}",
+                "Read timed out",
+            ) from exc
         cause: BaseException | None = exc
         while cause is not None:
             if isinstance(cause, socket.gaierror):
-                raise SaaSClientError("dns", "PEKA hostname could not be resolved") from exc
+                raise error(
+                    "dns",
+                    f"DNS resolution failed for {host or 'the PEKA hostname'}",
+                    "DNS resolution failed",
+                ) from exc
             if isinstance(cause, ConnectionRefusedError):
-                raise SaaSClientError("connection_refused", "PEKA refused the connection") from exc
+                raise error(
+                    "connection_refused",
+                    f"Connection refused by {host or 'PEKA'}",
+                    "Connection refused",
+                ) from exc
+            if isinstance(cause, OSError) and cause.errno in {
+                errno.ECONNREFUSED,
+                61,
+                111,
+            }:
+                raise error(
+                    "connection_refused",
+                    f"Connection refused by {host or 'PEKA'}",
+                    "Connection refused",
+                ) from exc
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                raise error(
+                    "tls_verification",
+                    f"TLS certificate verification failed for {host or 'PEKA'}",
+                    "TLS certificate verification failed",
+                ) from exc
             if isinstance(cause, ssl.SSLError):
-                raise SaaSClientError("tls", "PEKA TLS validation failed") from exc
-            cause = cause.__cause__
+                raise error(
+                    "tls",
+                    f"TLS handshake failed for {host or 'PEKA'}",
+                    "TLS/SSL connection failed",
+                ) from exc
+            cause = cause.__cause__ or cause.__context__
         if isinstance(exc, httpx.TimeoutException):
-            raise SaaSClientError("timeout", "PEKA request timed out") from exc
-        raise SaaSClientError("connection", "PEKA could not be reached") from exc
+            raise error(
+                "transport_timeout",
+                f"Request timed out while contacting {host or 'PEKA'}",
+                "Connection timed out",
+            ) from exc
+        raise error(
+            "transport",
+            f"Unknown transport error while contacting {host or 'PEKA'}",
+            "Unknown transport error",
+        ) from exc

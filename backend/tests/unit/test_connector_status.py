@@ -15,7 +15,7 @@ NOW = datetime(2026, 7, 20, 12, tzinfo=UTC)
         ({"last_success_at": None}, "awaiting_first_heartbeat"),
         ({"last_success_at": None, "consecutive_failures": 1}, "reconnecting"),
         ({"last_success_at": NOW - timedelta(seconds=100)}, "connected"),
-        ({"last_success_at": NOW - timedelta(seconds=100), "unhealthy_sources": 1}, "degraded"),
+        ({"last_success_at": NOW - timedelta(seconds=100), "unhealthy_sources": 1}, "connected"),
         (
             {"last_success_at": NOW - timedelta(seconds=100), "consecutive_failures": 1},
             "reconnecting",

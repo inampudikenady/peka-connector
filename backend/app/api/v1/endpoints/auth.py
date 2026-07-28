@@ -14,6 +14,7 @@ from app.api.schemas import (
     ChangePasswordRequest,
     CurrentUserResponse,
     LoginRequest,
+    Role,
     SetupStatusResponse,
     TokenResponse,
 )
@@ -161,7 +162,8 @@ async def logout(
 
 @router.get("/me", response_model=CurrentUserResponse)
 async def me(user: CurrentUser) -> CurrentUserResponse:
-    return CurrentUserResponse(id=user.id, username=user.username, role=user.role)
+    role: Role = "administrator" if user.role == "administrator" else "read_only"
+    return CurrentUserResponse(id=user.id, username=user.username, role=role)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

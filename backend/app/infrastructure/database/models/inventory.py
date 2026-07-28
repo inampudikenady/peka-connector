@@ -209,6 +209,52 @@ class InventoryConflictModel(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 
 
+class InventoryServiceModel(Base):
+    __tablename__ = "inventory_services"
+    __table_args__ = (UniqueConstraint("observation_id", "protocol", "port", "path"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_assets.id", ondelete="CASCADE"), index=True
+    )
+    observation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_observations.id", ondelete="CASCADE"), index=True
+    )
+    service_type: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    protocol: Mapped[str] = mapped_column(String(16))
+    port: Mapped[int] = mapped_column(index=True)
+    path: Mapped[str] = mapped_column(String(1000), default="/")
+    endpoint: Mapped[str] = mapped_column(String(2000))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class InventoryDependencyModel(Base):
+    __tablename__ = "inventory_dependencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_asset_id", "relation_type", "target_reference", "source_observation_id"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    source_asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_assets.id", ondelete="CASCADE"), index=True
+    )
+    target_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("inventory_assets.id", ondelete="SET NULL"), index=True, default=None
+    )
+    source_observation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_observations.id", ondelete="CASCADE"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_reference: Mapped[str] = mapped_column(String(2000))
+    evidence: Mapped[str] = mapped_column(String(1000))
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
 class PrometheusConfigurationModel(Base):
     __tablename__ = "prometheus_configurations"
 

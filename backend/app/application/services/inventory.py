@@ -14,8 +14,10 @@ from app.infrastructure.database.models.inventory import (
     InventoryAssetModel,
     InventoryConflictModel,
     InventoryCorrelationModel,
+    InventoryDependencyModel,
     InventoryIdentityModel,
     InventoryObservationModel,
+    InventoryServiceModel,
     PrometheusConfigurationModel,
 )
 
@@ -355,6 +357,120 @@ class InventoryService:
                     },
                 )
             )
+
+    async def sync_prometheus_topology(
+        self,
+        observation: InventoryObservationModel,
+        configuration: PrometheusConfigurationModel,
+        target: dict[str, Any],
+    ) -> None:
+        if observation.asset_id is None:
+            return
+        scrape_url = clean_text(target.get("scrapeUrl"))
+        if not scrape_url:
+            return
+        parsed = urlparse(scrape_url)
+        if not parsed.hostname:
+            return
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        target_labels = target.get("labels")
+        labels: dict[str, Any] = target_labels if isinstance(target_labels, dict) else {}
+        job = str(labels.get("job") or "").casefold()
+        service_type = self._service_type(port, job)
+        now = datetime.now(UTC)
+        service = await self.session.scalar(
+            select(InventoryServiceModel).where(
+                InventoryServiceModel.observation_id == observation.id,
+                InventoryServiceModel.protocol == (parsed.scheme or "http"),
+                InventoryServiceModel.port == port,
+                InventoryServiceModel.path == (parsed.path or "/"),
+            )
+        )
+        if service is None:
+            service = InventoryServiceModel(
+                asset_id=observation.asset_id,
+                observation_id=observation.id,
+                service_type=service_type,
+                name=service_type.replace("_", " ").title(),
+                protocol=parsed.scheme or "http",
+                port=port,
+                path=parsed.path or "/",
+                endpoint=scrape_url,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            self.session.add(service)
+        else:
+            service.asset_id = observation.asset_id
+            service.service_type = service_type
+            service.endpoint = scrape_url
+            service.last_seen_at = now
+
+        await self._upsert_dependency(
+            observation,
+            "scraped_by",
+            configuration.base_url,
+            f"Prometheus active target in configuration {configuration.name}",
+            now,
+        )
+        global_url = clean_text(target.get("globalUrl"))
+        if global_url:
+            global_host = urlparse(global_url).hostname
+            if global_host and global_host.casefold() != parsed.hostname.casefold():
+                await self._upsert_dependency(
+                    observation,
+                    "reverse_proxied_by",
+                    global_url,
+                    "Prometheus global URL host differs from the scrape URL host",
+                    now,
+                )
+
+    async def _upsert_dependency(
+        self,
+        observation: InventoryObservationModel,
+        relation_type: str,
+        target_reference: str,
+        evidence: str,
+        now: datetime,
+    ) -> None:
+        assert observation.asset_id is not None
+        dependency = await self.session.scalar(
+            select(InventoryDependencyModel).where(
+                InventoryDependencyModel.source_asset_id == observation.asset_id,
+                InventoryDependencyModel.source_observation_id == observation.id,
+                InventoryDependencyModel.relation_type == relation_type,
+                InventoryDependencyModel.target_reference == target_reference,
+            )
+        )
+        if dependency is None:
+            self.session.add(
+                InventoryDependencyModel(
+                    source_asset_id=observation.asset_id,
+                    source_observation_id=observation.id,
+                    relation_type=relation_type,
+                    target_reference=target_reference,
+                    evidence=evidence,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+        else:
+            dependency.last_seen_at = now
+            dependency.evidence = evidence
+
+    @staticmethod
+    def _service_type(port: int, job: str) -> str:
+        hints = (
+            ("windows_exporter", ("windows",), (9182,)),
+            ("process_exporter", ("process",), (9256,)),
+            ("node_exporter", ("node",), (9100,)),
+            ("prometheus", ("prometheus",), (9090,)),
+            ("loki", ("loki",), (3100,)),
+        )
+        for service_type, job_hints, ports in hints:
+            if port in ports or any(hint in job for hint in job_hints):
+                return service_type
+        return "metrics_endpoint"
 
     async def _find_asset(
         self, identities: list[tuple[str, str, str]]
@@ -708,6 +824,22 @@ class InventoryService:
                 )
             ).all()
         )
+        services = list(
+            (
+                await self.session.scalars(
+                    select(InventoryServiceModel).where(InventoryServiceModel.asset_id == asset.id)
+                )
+            ).all()
+        )
+        dependencies = list(
+            (
+                await self.session.scalars(
+                    select(InventoryDependencyModel).where(
+                        InventoryDependencyModel.source_asset_id == asset.id
+                    )
+                )
+            ).all()
+        )
         return {
             "asset": {
                 column.name: getattr(asset, column.name) for column in asset.__table__.columns
@@ -741,6 +873,32 @@ class InventoryService:
                     "resolution_status": item.resolution_status,
                 }
                 for item in conflicts
+            ],
+            "services": [
+                {
+                    "id": item.id,
+                    "service_type": item.service_type,
+                    "name": item.name,
+                    "protocol": item.protocol,
+                    "port": item.port,
+                    "path": item.path,
+                    "endpoint": item.endpoint,
+                    "first_seen_at": item.first_seen_at,
+                    "last_seen_at": item.last_seen_at,
+                }
+                for item in services
+            ],
+            "dependencies": [
+                {
+                    "id": item.id,
+                    "relation_type": item.relation_type,
+                    "target_asset_id": item.target_asset_id,
+                    "target_reference": item.target_reference,
+                    "evidence": item.evidence,
+                    "first_seen_at": item.first_seen_at,
+                    "last_seen_at": item.last_seen_at,
+                }
+                for item in dependencies
             ],
         }
 

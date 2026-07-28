@@ -1,5 +1,10 @@
+import asyncio
 import hashlib
+import ipaddress
 import json
+import socket
+import ssl
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
@@ -9,12 +14,14 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.certificates import TrustedCertificateService
 from app.application.services.inventory import (
     InventoryService,
     endpoint_identity,
     normalize_hostname,
     row_checksum,
 )
+from app.core.config import Settings, get_settings
 from app.core.logging import sanitize
 from app.infrastructure.database.models.inventory import (
     InventoryObservationModel,
@@ -46,6 +53,25 @@ def validate_base_url(value: str) -> str:
             "Prometheus URL must be an HTTP(S) base URL without credentials, query, or fragment.",
         )
     return clean
+
+
+def endpoint_warnings(value: str) -> list[str]:
+    parsed = urlparse(value)
+    if parsed.scheme != "http":
+        return []
+    hostname = parsed.hostname or ""
+    internal = hostname.casefold() == "localhost" or "." not in hostname
+    try:
+        address = ipaddress.ip_address(hostname)
+        internal = address.is_private or address.is_loopback or address.is_link_local
+    except ValueError:
+        pass
+    if internal:
+        return [
+            "This internal Prometheus endpoint uses unencrypted HTTP. "
+            "Credentials and metrics metadata are not protected in transit."
+        ]
+    return ["This Prometheus endpoint uses unencrypted public HTTP. HTTPS is strongly recommended."]
 
 
 def target_id(configuration_id: UUID, target: dict[str, Any]) -> str:
@@ -129,9 +155,11 @@ class PrometheusService:
         self,
         session: AsyncSession,
         encryption: SecretEncryptionService,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.encryption = encryption
+        self.settings = settings or get_settings()
 
     async def list_configurations(self) -> list[dict[str, Any]]:
         items = list(
@@ -201,6 +229,105 @@ class PrometheusService:
             "success": True,
             "message": "Prometheus connection succeeded.",
             "version": payload.get("data", {}).get("version"),
+            "warnings": endpoint_warnings(configuration.base_url),
+        }
+
+    async def diagnose(self, configuration_id: UUID) -> dict[str, Any]:
+        configuration = await self._get(configuration_id)
+        parsed = urlparse(configuration.base_url)
+        hostname = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        timeout = configuration.request_timeout_seconds
+        stages: list[dict[str, Any]] = []
+
+        async def stage(name: str, operation: Any) -> bool:
+            started = time.perf_counter()
+            try:
+                detail = await asyncio.wait_for(operation(), timeout=timeout)
+                stages.append(
+                    {
+                        "stage": name,
+                        "status": "success",
+                        "message": str(detail),
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    }
+                )
+                return True
+            except Exception as exc:
+                error = self._network_error(exc)
+                stages.append(
+                    {
+                        "stage": name,
+                        "status": "failed",
+                        "code": error.code,
+                        "message": str(error),
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    }
+                )
+                return False
+
+        async def dns() -> str:
+            addresses = await asyncio.get_running_loop().getaddrinfo(
+                hostname, port, type=socket.SOCK_STREAM
+            )
+            unique = list(dict.fromkeys(item[4][0] for item in addresses))
+            return f"Resolved {hostname} to {', '.join(unique[:4])}"
+
+        async def tcp() -> str:
+            reader, writer = await asyncio.open_connection(hostname, port)
+            del reader
+            writer.close()
+            await writer.wait_closed()
+            return f"TCP connection to {hostname}:{port} succeeded"
+
+        async def tls() -> str:
+            context = (
+                await TrustedCertificateService(self.session, self.settings).ssl_context()
+                if configuration.tls_verify
+                else ssl._create_unverified_context()
+            )
+            reader, writer = await asyncio.open_connection(
+                hostname, port, ssl=context, server_hostname=hostname
+            )
+            del reader
+            writer.close()
+            await writer.wait_closed()
+            return (
+                "TLS handshake and certificate verification succeeded"
+                if configuration.tls_verify
+                else "TLS handshake succeeded; certificate verification is disabled"
+            )
+
+        if not await stage("DNS", dns):
+            return {
+                "success": False,
+                "stages": stages,
+                "warnings": endpoint_warnings(configuration.base_url),
+            }
+        if not await stage("TCP", tcp):
+            return {
+                "success": False,
+                "stages": stages,
+                "warnings": endpoint_warnings(configuration.base_url),
+            }
+        if parsed.scheme == "https" and not await stage("TLS", tls):
+            return {
+                "success": False,
+                "stages": stages,
+                "warnings": endpoint_warnings(configuration.base_url),
+            }
+
+        async def http() -> str:
+            payload = await self._request(configuration, "/api/v1/status/buildinfo")
+            version = payload.get("data", {}).get("version")
+            suffix = f" (version {version})" if version else ""
+            return f"Prometheus HTTP API returned a valid response{suffix}"
+
+        success = await stage("HTTP", http)
+        return {
+            "success": success,
+            "stages": stages,
+            "warnings": endpoint_warnings(configuration.base_url),
         }
 
     async def scan(self, configuration_id: UUID) -> dict[str, Any]:
@@ -255,6 +382,7 @@ class PrometheusService:
                     observation.observed_at = now
                     observation.last_seen_at = now
                 await inventory.correlate_prometheus(observation, target_identities(target))
+                await inventory.sync_prometheus_topology(observation, configuration, target)
                 ambiguous += observation.status == "ambiguous"
                 unmatched += observation.status == "unmatched"
             configuration.last_successful_scan_at = now
@@ -299,9 +427,12 @@ class PrometheusService:
             else:
                 auth = httpx.BasicAuth(configuration.username or "", secret)
         try:
+            verify: bool | ssl.SSLContext = configuration.tls_verify
+            if configuration.tls_verify:
+                verify = await TrustedCertificateService(self.session, self.settings).ssl_context()
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(configuration.request_timeout_seconds),
-                verify=configuration.tls_verify,
+                verify=verify,
                 follow_redirects=False,
                 auth=auth,
                 headers=headers,
@@ -318,15 +449,79 @@ class PrometheusService:
             raise PrometheusError(
                 code, f"Prometheus returned HTTP {exc.response.status_code}.", 502
             ) from exc
-        except (httpx.HTTPError, ValueError) as exc:
+        except httpx.HTTPError as exc:
+            raise self._network_error(exc) from exc
+        except ValueError as exc:
             raise PrometheusError(
-                "CONNECTION_FAILED", "Prometheus could not be reached.", 502
+                "INVALID_PROMETHEUS_RESPONSE",
+                "Prometheus returned a response that is not valid JSON.",
+                502,
             ) from exc
         if not isinstance(payload, dict) or payload.get("status") != "success":
             raise PrometheusError(
-                "MALFORMED_RESPONSE", "Prometheus returned an invalid response.", 502
+                "INVALID_PROMETHEUS_RESPONSE", "Prometheus returned an invalid response.", 502
             )
         return payload
+
+    @staticmethod
+    def _network_error(exc: Exception) -> PrometheusError:
+        if isinstance(exc, PrometheusError):
+            return exc
+        if isinstance(exc, TimeoutError | asyncio.TimeoutError | httpx.TimeoutException):
+            return PrometheusError("TIMEOUT", "Prometheus request timed out.", 504)
+        detail = str(exc).casefold()
+        cause: BaseException | None = exc
+        while cause is not None:
+            if isinstance(cause, socket.gaierror):
+                return PrometheusError(
+                    "DNS_RESOLUTION_FAILED", "Prometheus hostname could not be resolved.", 502
+                )
+            if isinstance(cause, ConnectionRefusedError):
+                return PrometheusError(
+                    "CONNECTION_REFUSED",
+                    "The Prometheus host refused the TCP connection.",
+                    502,
+                )
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                certificate_detail = str(cause).casefold()
+                if (
+                    "hostname mismatch" in certificate_detail
+                    or "not valid for" in certificate_detail
+                ):
+                    return PrometheusError(
+                        "TLS_HOSTNAME_MISMATCH",
+                        "The Prometheus TLS certificate does not match the configured hostname.",
+                        502,
+                    )
+                return PrometheusError(
+                    "TLS_CERTIFICATE_NOT_TRUSTED",
+                    "The Prometheus TLS certificate is not trusted. Add its issuing CA "
+                    "in Settings → Certificates.",
+                    502,
+                )
+            cause = cause.__cause__ or cause.__context__
+        if "name or service not known" in detail or "nodename nor servname" in detail:
+            return PrometheusError(
+                "DNS_RESOLUTION_FAILED", "Prometheus hostname could not be resolved.", 502
+            )
+        if "connection refused" in detail:
+            return PrometheusError(
+                "CONNECTION_REFUSED", "The Prometheus host refused the TCP connection.", 502
+            )
+        if "hostname mismatch" in detail:
+            return PrometheusError(
+                "TLS_HOSTNAME_MISMATCH",
+                "The Prometheus TLS certificate does not match the configured hostname.",
+                502,
+            )
+        if "certificate verify failed" in detail or "self-signed certificate" in detail:
+            return PrometheusError(
+                "TLS_CERTIFICATE_NOT_TRUSTED",
+                "The Prometheus TLS certificate is not trusted. Add its issuing CA "
+                "in Settings → Certificates.",
+                502,
+            )
+        return PrometheusError("CONNECTION_FAILED", "Prometheus could not be reached.", 502)
 
     async def _get(self, configuration_id: UUID) -> PrometheusConfigurationModel:
         configuration = await self.session.get(PrometheusConfigurationModel, configuration_id)
@@ -353,6 +548,7 @@ class PrometheusService:
             "target_count": item.target_count,
             "healthy_target_count": item.healthy_target_count,
             "unhealthy_target_count": item.unhealthy_target_count,
+            "warnings": endpoint_warnings(item.base_url),
         }
 
     @staticmethod

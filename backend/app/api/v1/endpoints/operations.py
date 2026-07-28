@@ -92,6 +92,7 @@ async def overview(
         tenant_id=data["tenant_id"],
         next_heartbeat_at=data["next_heartbeat_at"],
         heartbeat_failure_count=data["heartbeat_failure_count"],
+        last_heartbeat_error=data["last_heartbeat_error"],
         saas_url=data["saas_url"],
         registered_at=data["registered_at"],
         last_heartbeat_attempt_at=data["last_heartbeat_attempt_at"],

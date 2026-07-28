@@ -37,10 +37,33 @@ class HeartbeatInProgressError(Exception):
     pass
 
 
+def heartbeat_failure_context(
+    error: SaaSClientError,
+    correlation_id: str,
+    connection_state: str,
+) -> dict[str, object | None]:
+    """Return the allow-listed fields safe to persist in logs and activity."""
+    return {
+        "event": "heartbeat_failed",
+        "failure_type": error.kind,
+        "failure_reason": error.failure_reason,
+        "destination_host": error.destination_host,
+        "request_method": error.method,
+        "request_path": error.request_path,
+        "http_status": error.status_code,
+        "api_error_code": error.error_code,
+        "api_error_message": error.safe_api_message,
+        "saas_request_id": error.request_id,
+        "correlation_id": correlation_id,
+        "connection_state": connection_state,
+    }
+
+
 class ConnectorScheduler:
     def __init__(self) -> None:
         self._scheduler = AsyncIOScheduler(timezone=UTC)
         self._heartbeat_lock = Lock()
+        self._manual_heartbeat_retry_claimed = False
         self._document_reconcile_lock = Lock()
         self._document_worker_lock = Lock()
 
@@ -194,6 +217,7 @@ class ConnectorScheduler:
             service = PrometheusService(
                 session,
                 SecretEncryptionService(get_settings().encryption_key),
+                get_settings(),
             )
             try:
                 await operations.record_event(
@@ -440,9 +464,16 @@ class ConnectorScheduler:
         logger.info("Heartbeat job removed")
 
     async def retry_heartbeat_now(self) -> None:
-        if self._heartbeat_lock.locked():
+        if self._manual_heartbeat_retry_claimed or self._heartbeat_lock.locked():
             raise HeartbeatInProgressError("A heartbeat attempt is already in progress")
-        await self._run_heartbeat(force=True)
+        self._manual_heartbeat_retry_claimed = True
+        try:
+            pending = self._scheduler.get_job("heartbeat")
+            if pending:
+                self._scheduler.remove_job("heartbeat")
+            await self._run_heartbeat(force=True)
+        finally:
+            self._manual_heartbeat_retry_claimed = False
 
     async def _run_heartbeat(self, force: bool = False) -> None:
         if self._heartbeat_lock.locked():
@@ -521,15 +552,10 @@ class ConnectorScheduler:
                     )
                 await operations.record_event(
                     "heartbeat.failed",
-                    "Connector heartbeat failed",
+                    f"Heartbeat failed: {exc}",
                     target_type="connector",
                     target_id=product.connector_id,
-                    details={
-                        "error": str(exc),
-                        "kind": exc.kind,
-                        "correlation_id": correlation_id,
-                        "connection_state": product.saas_status,
-                    },
+                    details=heartbeat_failure_context(exc, correlation_id, product.saas_status),
                     level="ERROR",
                     component="heartbeat",
                 )
@@ -567,7 +593,18 @@ class ConnectorScheduler:
                         level="WARNING",
                         component="heartbeat",
                     )
-                logger.warning("Heartbeat failed: %s", exc)
+                logger.warning(
+                    "Heartbeat failed: %s "
+                    "(failure_type=%s, destination_host=%s, request_path=%s, "
+                    "http_status=%s, api_error_code=%s, request_id=%s)",
+                    exc,
+                    exc.kind,
+                    exc.destination_host or "unknown",
+                    exc.request_path or "unknown",
+                    exc.status_code or "none",
+                    exc.error_code or "none",
+                    exc.request_id or "none",
+                )
             except RegistrationStateError:
                 logger.info("Heartbeat skipped because connector is unregistered")
             except Exception:

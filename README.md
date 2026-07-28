@@ -32,7 +32,10 @@ It does **not** perform OCR, parsing, chunking, embeddings, AI inference, or vec
     documents/ dedicated writable managed-document volume
 ```
 
-Only `/data` is persistent. The database is `/data/state/peka.db`. General customer sources are mounted read-only at `/data/sources`. A nested, dedicated volume makes only `/data/sources/documents` writable for managed document ingestion; its path is fixed and is never configurable in the UI.
+The database and connector configuration are persisted in `/data`. General customer sources are
+mounted read-only at `/data/external-sources`. Separate sibling named volumes make
+`/data/sources/documents` and `/data/sources/cmdb` writable without nesting them beneath a
+read-only mount.
 
 ## Install
 
@@ -42,7 +45,9 @@ Only `/data` is persistent. The database is `/data/state/peka.db`. General custo
    mkdir -p sources
    ```
 
-2. Copy `.env.example` to `.env`. Generate independent JWT and encryption secrets (the script can be run twice), and optionally set `PEKA_SOURCES_PATH`. Preserve `PEKA_ENCRYPTION_KEY` across replacements and restores; losing or changing it makes stored SaaS credentials unreadable. Leave bootstrap administrator fields blank for interactive setup.
+2. Copy `.env.example` to `.env` and optionally set `PEKA_SOURCES_PATH`. Leave bootstrap
+   administrator fields blank for interactive setup. JWT and encryption secrets are generated
+   automatically and persisted with mode `0600` in `/data/config/secrets`.
 
 3. Start the single connector service:
 
@@ -62,7 +67,10 @@ The default Compose file mounts the customer-selected `PEKA_SOURCES_PATH` read-o
 `/data/sources/cmdb`. A short initialization service assigns those persistent paths to UID/GID
 10001 before the non-root connector starts.
 
-After startup, customer configuration is managed through the UI. Customers do not edit Compose, YAML, JSON, or SQLite for normal connector operation. Environment values are limited to deployment bootstrap concerns: published HTTP port, JWT signing secret, encryption key, optional unattended administrator, source host mount, and initial log level.
+After startup, customer configuration is managed through the UI. Customers do not edit Compose,
+YAML, JSON, SQLite, JWT secrets, or encryption keys for normal connector operation. Environment
+values are limited to deployment concerns such as published HTTP port, optional unattended
+administrator, source host mount, and initial log level.
 
 ## SaaS registration and heartbeat
 

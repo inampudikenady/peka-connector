@@ -32,8 +32,11 @@ services:
     environment:
       PEKA_ENVIRONMENT: production
       PEKA_DATABASE_URL: sqlite+aiosqlite:////data/state/peka.db
-      PEKA_JWT_SECRET: ${PEKA_JWT_SECRET:?Set PEKA_JWT_SECRET to at least 32 random characters}
-      PEKA_ENCRYPTION_KEY: ${PEKA_ENCRYPTION_KEY:?Set PEKA_ENCRYPTION_KEY to at least 32 random characters}
+      # Optional only for a one-time, backwards-compatible migration. The
+      # entrypoint persists existing values, or generates new values, under
+      # /data/config/secrets and uses those files on later starts.
+      PEKA_JWT_SECRET: ${PEKA_JWT_SECRET:-}
+      PEKA_ENCRYPTION_KEY: ${PEKA_ENCRYPTION_KEY:-}
       PEKA_BOOTSTRAP_ADMIN_USERNAME: ${PEKA_BOOTSTRAP_ADMIN_USERNAME:-}
       PEKA_BOOTSTRAP_ADMIN_PASSWORD: ${PEKA_BOOTSTRAP_ADMIN_PASSWORD:-}
       PEKA_LOG_LEVEL: ${PEKA_LOG_LEVEL:-INFO}

@@ -42,6 +42,9 @@ class DocumentModel(Base):
     uploaded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     remote_document_id: Mapped[str | None] = mapped_column(String(200), default=None)
     remote_version_id: Mapped[str | None] = mapped_column(String(200), default=None)
+    owner_instance_id: Mapped[str | None] = mapped_column(String(36), default=None, index=True)
+    owner_connector_id: Mapped[str | None] = mapped_column(String(200), default=None, index=True)
+    owner_tenant_id: Mapped[str | None] = mapped_column(String(200), default=None, index=True)
     last_error_code: Mapped[str | None] = mapped_column(String(100), default=None)
     last_error_message: Mapped[str | None] = mapped_column(String(1000), default=None)
     first_seen_at: Mapped[datetime] = mapped_column(
@@ -60,6 +63,10 @@ class DocumentModel(Base):
     delivery_jobs: Mapped[list["DocumentDeliveryJobModel"]] = relationship(
         back_populates="document", cascade="all, delete-orphan", passive_deletes=True
     )
+    if TYPE_CHECKING:
+        can_delete: bool
+        delete_unavailable_reason: str | None
+        deletion_in_progress: bool
 
 
 class DocumentDeliveryJobModel(Base):

@@ -1,4 +1,6 @@
 import json
+import socket
+import ssl
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -18,6 +20,178 @@ from app.infrastructure.saas.client import HttpxPEKASaaSClient
 
 def client_for(handler: httpx.AsyncBaseTransport) -> HttpxPEKASaaSClient:
     return HttpxPEKASaaSClient(1, 1, transport=handler)
+
+
+def heartbeat_request() -> ConnectorHeartbeatRequest:
+    return ConnectorHeartbeatRequest(
+        instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
+        name="PEKA Connector",
+        environment="production",
+        connector_version="0.2.0",
+        timestamp=datetime(2026, 7, 20, 12, tzinfo=UTC),
+        status="healthy",
+        uptime_seconds=123,
+        sources=SourceHeartbeatSummary(total=0, healthy=0, unhealthy=0, disabled=0),
+        capabilities=["filesystem_documents"],
+    )
+
+
+class FailingTransport(httpx.AsyncBaseTransport):
+    def __init__(self, failure: str) -> None:
+        self.failure = failure
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self.failure == "dns":
+            try:
+                raise socket.gaierror(-2, "Name or service not known")
+            except socket.gaierror as exc:
+                raise httpx.ConnectError("connect failed", request=request) from exc
+        if self.failure == "refused":
+            try:
+                raise ConnectionRefusedError(111, "Connection refused")
+            except ConnectionRefusedError as exc:
+                raise httpx.ConnectError("connect failed", request=request) from exc
+        if self.failure == "connect_timeout":
+            raise httpx.ConnectTimeout("connect timeout", request=request)
+        if self.failure == "read_timeout":
+            raise httpx.ReadTimeout("read timeout", request=request)
+        if self.failure == "tls_verification":
+            try:
+                raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+            except ssl.SSLCertVerificationError as exc:
+                raise httpx.ConnectError("TLS failed", request=request) from exc
+        if self.failure == "tls":
+            try:
+                raise ssl.SSLError("TLS protocol error")
+            except ssl.SSLError as exc:
+                raise httpx.ConnectError("TLS failed", request=request) from exc
+        raise httpx.ConnectError("unknown failure", request=request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "kind", "reason"),
+    [
+        ("dns", "dns", "DNS resolution failed"),
+        ("refused", "connection_refused", "Connection refused"),
+        ("connect_timeout", "connection_timeout", "Connection timed out"),
+        ("read_timeout", "read_timeout", "Read timed out"),
+        ("tls_verification", "tls_verification", "TLS certificate verification failed"),
+        ("tls", "tls", "TLS/SSL connection failed"),
+        ("unknown", "transport", "Unknown transport error"),
+    ],
+)
+async def test_heartbeat_transport_failures_are_classified(
+    failure: str, kind: str, reason: str
+) -> None:
+    client = client_for(FailingTransport(failure))
+    with pytest.raises(SaaSClientError) as captured:
+        await client.send_heartbeat(
+            "https://peka.example.com",
+            UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+            "connector-secret",
+            heartbeat_request(),
+        )
+    error = captured.value
+    assert error.kind == kind
+    assert error.failure_reason == reason
+    assert error.destination_host == "peka.example.com"
+    assert error.request_path == "/api/v1/connectors/<redacted>/heartbeat"
+    assert "connector-secret" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "kind", "reason"),
+    [
+        (400, "http_400", "PEKA rejected the heartbeat request"),
+        (401, "authentication", "Authentication rejected by PEKA"),
+        (403, "forbidden", "Authentication rejected by PEKA"),
+        (404, "not_found", "PEKA endpoint not found"),
+        (409, "conflict", "PEKA rejected the heartbeat conflict"),
+        (429, "rate_limited", "PEKA rate limit reached"),
+        (500, "server_error", "PEKA returned HTTP 500"),
+    ],
+)
+async def test_heartbeat_http_failures_include_only_safe_metadata(
+    status_code: int, kind: str, reason: str
+) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            status_code,
+            json={
+                "code": "invalid_connector_token",
+                "message": "The connector authentication was rejected.",
+                "authorization": "Bearer should-never-appear",
+            },
+            headers={"X-Request-ID": "safe-request-123"},
+        )
+    )
+    with pytest.raises(SaaSClientError) as captured:
+        await client_for(transport).send_heartbeat(
+            "https://peka.example.com",
+            UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+            "connector-secret",
+            heartbeat_request(),
+        )
+    error = captured.value
+    assert error.kind == kind
+    assert error.failure_reason == reason
+    assert error.status_code == status_code
+    assert error.error_code == "invalid_connector_token"
+    assert error.safe_api_message == "The connector authentication was rejected."
+    assert error.request_id == "safe-request-123"
+    serialized = " ".join(
+        str(value)
+        for value in (
+            error,
+            error.failure_reason,
+            error.error_code,
+            error.safe_api_message,
+            error.request_id,
+        )
+    )
+    assert "connector-secret" not in serialized
+    assert "Bearer should-never-appear" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_rejects_malformed_success_response() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"accepted": True, "unexpected": True})
+    )
+    with pytest.raises(SaaSClientError) as captured:
+        await client_for(transport).send_heartbeat(
+            "https://peka.example.com",
+            UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+            "connector-secret",
+            heartbeat_request(),
+        )
+    assert captured.value.kind == "malformed_response"
+    assert captured.value.failure_reason == "Unexpected heartbeat response"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_never_relays_secret_bearing_remote_message() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            401,
+            json={
+                "code": "invalid_connector_token",
+                "message": "Authorization: Bearer remote-secret-value",
+            },
+        )
+    )
+    with pytest.raises(SaaSClientError) as captured:
+        await client_for(transport).send_heartbeat(
+            "https://peka.example.com",
+            UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+            "local-connector-secret",
+            heartbeat_request(),
+        )
+    assert captured.value.safe_api_message is None
+    assert "remote-secret-value" not in str(captured.value)
+    assert "local-connector-secret" not in str(captured.value)
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     auth,
+    certificates,
     cmdb,
     diagnostics,
     documents,
@@ -28,3 +29,6 @@ api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(operations.router, tags=["operations"])
 api_router.include_router(diagnostics.router, prefix="/diagnostics", tags=["diagnostics"])
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
+api_router.include_router(
+    certificates.router, prefix="/settings/certificates", tags=["settings", "certificates"]
+)

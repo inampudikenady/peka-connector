@@ -1,3 +1,4 @@
+from app.infrastructure.database.models.certificate import TrustedCertificateAuthorityModel
 from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
 from app.infrastructure.database.models.inventory import (
     CMDBDatasetModel,
@@ -7,8 +8,10 @@ from app.infrastructure.database.models.inventory import (
     InventoryAssetModel,
     InventoryConflictModel,
     InventoryCorrelationModel,
+    InventoryDependencyModel,
     InventoryIdentityModel,
     InventoryObservationModel,
+    InventoryServiceModel,
     PrometheusConfigurationModel,
 )
 from app.infrastructure.database.models.operations import (
@@ -25,6 +28,7 @@ __all__ = [
     "AuditEventModel",
     "DocumentModel",
     "DocumentDeliveryJobModel",
+    "TrustedCertificateAuthorityModel",
     "CMDBDatasetModel",
     "CMDBDatasetVersionModel",
     "CMDBMappingProfileModel",
@@ -32,8 +36,10 @@ __all__ = [
     "InventoryAssetModel",
     "InventoryConflictModel",
     "InventoryCorrelationModel",
+    "InventoryDependencyModel",
     "InventoryIdentityModel",
     "InventoryObservationModel",
+    "InventoryServiceModel",
     "PrometheusConfigurationModel",
     "ProductSettingsModel",
     "RefreshTokenModel",

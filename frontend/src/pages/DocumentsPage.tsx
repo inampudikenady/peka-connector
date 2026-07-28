@@ -3,7 +3,7 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import ReplayOutlinedIcon from '@mui/icons-material/ReplayOutlined';
 import {
-  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
+  Alert, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
   FormControlLabel, Grid,
   IconButton, LinearProgress, Paper, Stack, Table, TableBody, TableCell, TableContainer,
   TableHead, TablePagination, TableRow, Tab, Tabs, TextField, Tooltip, Typography, Switch,
@@ -15,11 +15,50 @@ import type { DocumentUploadResult, ManagedDocument, ManagedDocumentSource } fro
 import { useAuth } from '../auth/AuthContext';
 import { LoadingState } from '../components/LoadingState';
 import { useToast } from '../components/ToastProvider';
+import { documentDeletionAction } from '../utils/documents';
 import { formatTimestamp, relativeTimestamp } from '../utils/time';
 
 const formatSize = (size: number) => size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
 const label = (value: string) => value.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 export const DOCUMENT_TABS = ['Files', 'Source settings'] as const;
+
+function DocumentDeleteAction({
+  document,
+  onDelete,
+}: {
+  document: ManagedDocument;
+  onDelete: (document: ManagedDocument) => void;
+}) {
+  const action = documentDeletionAction(document);
+  if (!action.visible) return null;
+  return <Tooltip title={action.tooltip}><span><IconButton color="error" disabled={action.disabled} aria-label={`Delete ${document.filename}`} onClick={() => onDelete(document)}><DeleteOutlineIcon /></IconButton></span></Tooltip>;
+}
+
+export function DocumentActions({
+  admin,
+  document,
+  onDetails,
+  onRetry,
+  onDelete,
+}: {
+  admin: boolean;
+  document: ManagedDocument;
+  onDetails: (document: ManagedDocument) => void;
+  onRetry: (document: ManagedDocument) => void;
+  onDelete: (document: ManagedDocument) => void;
+}) {
+  return <><Tooltip title="Document details"><IconButton aria-label={`Details for ${document.filename}`} onClick={() => onDetails(document)}><InfoOutlinedIcon /></IconButton></Tooltip>{admin && document.delivery_status === 'FAILED' && <Tooltip title="Retry delivery"><IconButton aria-label={`Retry ${document.filename}`} onClick={() => onRetry(document)}><ReplayOutlinedIcon /></IconButton></Tooltip>}{admin && <DocumentDeleteAction document={document} onDelete={onDelete} />}</>;
+}
+
+export function DocumentVisibilityControl({
+  showDeleted,
+  onChange,
+}: {
+  showDeleted: boolean;
+  onChange: (showDeleted: boolean) => void;
+}) {
+  return <FormControlLabel sx={{ alignSelf: 'flex-start' }} control={<Checkbox checked={showDeleted} onChange={(event) => onChange(event.target.checked)} />} label="Show deleted documents" />;
+}
 
 function Status({ value }: { value: string }) {
   const color = value.includes('FAILED') ? 'error' : value === 'UPLOADED' ? 'success' : value === 'UPLOADING' ? 'info' : value === 'UNSUPPORTED' ? 'warning' : 'default';
@@ -53,8 +92,10 @@ export function DocumentsPage() {
   const [uploading, setUploading] = useState(false); const [progress, setProgress] = useState(0);
   const [results, setResults] = useState<DocumentUploadResult[]>([]); const [details, setDetails] = useState<ManagedDocument | null>(null);
   const [deleting, setDeleting] = useState<ManagedDocument | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [tab, setTab] = useState(0);
-  const load = useCallback(async () => { setLoading(true); setError(''); try { const response = await api.documents(page + 1); setItems(response.items); setTotal(response.total); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Documents could not be loaded'); } finally { setLoading(false); } }, [page]);
+  const load = useCallback(async () => { setLoading(true); setError(''); try { const response = await api.documents(page + 1, showDeleted); setItems(response.items); setTotal(response.total); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Documents could not be loaded'); } finally { setLoading(false); } }, [page, showDeleted]);
   useEffect(() => { void load(); }, [load]);
   const upload = async (files: File[]) => {
     if (!files.length || !admin || uploading) return;
@@ -64,7 +105,7 @@ export function DocumentsPage() {
     finally { setUploading(false); setProgress(0); if (input.current) input.current.value = ''; }
   };
   const retry = async (document: ManagedDocument) => { try { await api.retryDocument(document.id); toast.show('Document delivery queued for retry', 'success'); await load(); } catch (reason) { toast.show(reason instanceof Error ? reason.message : 'Retry failed', 'error'); } };
-  const remove = async () => { if (!deleting) return; try { await api.deleteDocument(deleting.id); toast.show('Document deletion queued for PEKA', 'success'); setDeleting(null); await load(); } catch (reason) { toast.show(reason instanceof Error ? reason.message : 'Delete failed', 'error'); } };
+  const remove = async () => { if (!deleting || deletingBusy) return; setDeletingBusy(true); try { await api.deleteDocument(deleting.id); toast.show('Document deletion queued for PEKA', 'success'); setDeleting(null); await load(); } catch (reason) { toast.show(reason instanceof Error ? reason.message : 'Delete failed', 'error'); } finally { setDeletingBusy(false); } };
   return <Stack spacing={3}>
     <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2}><div><Typography variant="h4" fontWeight={700}>Documents</Typography><Typography color="text.secondary">Controlled document delivery to PEKA</Typography></div>{admin && tab === 0 && <Button variant="contained" startIcon={<CloudUploadOutlinedIcon />} disabled={uploading} onClick={() => input.current?.click()}>Upload documents</Button>}</Stack>
     <Tabs value={tab} onChange={(_, value: number) => setTab(value)} aria-label="Document management">{DOCUMENT_TABS.map((tabLabel) => <Tab key={tabLabel} label={tabLabel} />)}</Tabs>
@@ -72,9 +113,10 @@ export function DocumentsPage() {
     {admin && <Paper variant="outlined" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void upload(Array.from(event.dataTransfer.files)); }} sx={{ p: 4, textAlign: 'center', borderStyle: 'dashed', bgcolor: 'background.default' }}><input ref={input} hidden type="file" multiple accept=".txt,.md,.pdf,.docx,.xlsx,.csv" onChange={(event) => void upload(Array.from(event.target.files ?? []))} /><CloudUploadOutlinedIcon color="primary" fontSize="large" /><Typography fontWeight={600}>Drag documents here or use Upload documents</Typography><Typography variant="body2" color="text.secondary">TXT, Markdown, PDF, DOCX, XLSX, or CSV · up to 100 MB per file</Typography>{uploading && <Box sx={{ mt: 2 }}><LinearProgress variant="determinate" value={progress} /><Typography variant="caption">Uploading {progress}%</Typography></Box>}</Paper>}
     {results.length > 0 && <Stack spacing={1}>{results.map((result, index) => <Alert key={`${result.filename}-${index}`} severity={result.success ? 'success' : 'error'}>{result.filename}: {result.message}</Alert>)}</Stack>}
     {error && <Alert severity="error" action={<Button color="inherit" onClick={() => void load()}>Retry</Button>}>{error}</Alert>}
-    {loading ? <LoadingState label="Loading documents" /> : items.length === 0 ? <Paper variant="outlined" sx={{ p: 5, textAlign: 'center' }}><Typography>No documents have been added yet.</Typography></Paper> : <Paper variant="outlined"><TableContainer><Table><TableHead><TableRow><TableCell>Document</TableCell><TableCell>Type</TableCell><TableCell>Size</TableCell><TableCell>Local status</TableCell><TableCell>PEKA status</TableCell><TableCell>Last modified</TableCell><TableCell>Last attempted</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>{items.map((document) => <TableRow key={document.id} hover><TableCell><Typography fontWeight={600}>{document.filename}</Typography><Typography variant="caption" color="text.secondary">{document.relative_path}</Typography></TableCell><TableCell>{document.extension.slice(1).toUpperCase()}</TableCell><TableCell>{formatSize(document.size_bytes)}</TableCell><TableCell><Status value={document.local_status} /></TableCell><TableCell><Status value={document.delivery_status} /></TableCell><TableCell title={formatTimestamp(document.modified_at)}>{relativeTimestamp(document.modified_at)}</TableCell><TableCell title={formatTimestamp(document.last_upload_attempt_at)}>{relativeTimestamp(document.last_upload_attempt_at)}</TableCell><TableCell align="right"><Tooltip title="Document details"><IconButton aria-label={`Details for ${document.filename}`} onClick={() => setDetails(document)}><InfoOutlinedIcon /></IconButton></Tooltip>{admin && document.delivery_status === 'FAILED' && <Tooltip title="Retry delivery"><IconButton aria-label={`Retry ${document.filename}`} onClick={() => void retry(document)}><ReplayOutlinedIcon /></IconButton></Tooltip>}{admin && document.entry_method === 'UI_UPLOAD' && !document.deleted_at && <Tooltip title="Delete document"><IconButton color="error" aria-label={`Delete ${document.filename}`} onClick={() => setDeleting(document)}><DeleteOutlineIcon /></IconButton></Tooltip>}</TableCell></TableRow>)}</TableBody></Table></TableContainer><TablePagination component="div" count={total} page={page} rowsPerPage={25} rowsPerPageOptions={[25]} onPageChange={(_, next) => setPage(next)} /></Paper>}
+    <DocumentVisibilityControl showDeleted={showDeleted} onChange={(checked) => { setPage(0); setShowDeleted(checked); }} />
+    {loading ? <LoadingState label="Loading documents" /> : items.length === 0 ? <Paper variant="outlined" sx={{ p: 5, textAlign: 'center' }}><Typography>No documents have been added yet.</Typography></Paper> : <Paper variant="outlined"><TableContainer><Table><TableHead><TableRow><TableCell>Document</TableCell><TableCell>Type</TableCell><TableCell>Size</TableCell><TableCell>Local status</TableCell><TableCell>PEKA status</TableCell><TableCell>Last modified</TableCell><TableCell>Last attempted</TableCell><TableCell align="right">Actions</TableCell></TableRow></TableHead><TableBody>{items.map((document) => <TableRow key={document.id} hover><TableCell><Typography fontWeight={600}>{document.filename}</Typography><Typography variant="caption" color="text.secondary">{document.relative_path}</Typography></TableCell><TableCell>{document.extension.slice(1).toUpperCase()}</TableCell><TableCell>{formatSize(document.size_bytes)}</TableCell><TableCell><Status value={document.local_status} /></TableCell><TableCell><Status value={document.delivery_status} /></TableCell><TableCell title={formatTimestamp(document.modified_at)}>{relativeTimestamp(document.modified_at)}</TableCell><TableCell title={formatTimestamp(document.last_upload_attempt_at)}>{relativeTimestamp(document.last_upload_attempt_at)}</TableCell><TableCell align="right"><DocumentActions admin={admin} document={document} onDetails={setDetails} onRetry={(item) => void retry(item)} onDelete={setDeleting} /></TableCell></TableRow>)}</TableBody></Table></TableContainer><TablePagination component="div" count={total} page={page} rowsPerPage={25} rowsPerPageOptions={[25]} onPageChange={(_, next) => setPage(next)} /></Paper>}
     <Dialog open={Boolean(details)} onClose={() => setDetails(null)} fullWidth maxWidth="sm"><DialogTitle>Document details</DialogTitle><DialogContent dividers>{details && <Stack spacing={1}>{([['Filename', details.filename], ['Relative path', details.relative_path], ['MIME type', details.mime_type], ['Size', formatSize(details.size_bytes)], ['SHA-256', details.content_hash], ['Local status', label(details.local_status)], ['PEKA delivery status', label(details.delivery_status)], ['Discovered', formatTimestamp(details.discovered_at)], ['Modified', formatTimestamp(details.modified_at)], ['Upload attempts', String(details.upload_attempt_count)], ['Last attempted', formatTimestamp(details.last_upload_attempt_at)], ['Uploaded', formatTimestamp(details.uploaded_at)], ['Remote document ID', details.remote_document_id ?? 'Not assigned'], ['Last error', details.last_error_message ?? 'None']] as Array<[string, string]>).map(([name, value]) => <Box key={name}><Typography variant="caption" color="text.secondary">{name}</Typography><Typography sx={{ overflowWrap: 'anywhere', fontFamily: name.includes('SHA') || name.includes('ID') ? 'monospace' : undefined }}>{value}</Typography></Box>)}</Stack>}</DialogContent><DialogActions><Button onClick={() => setDetails(null)}>Close</Button></DialogActions></Dialog>
-    <Dialog open={Boolean(deleting)} onClose={() => setDeleting(null)}><DialogTitle>Delete document?</DialogTitle><DialogContent><Typography>Delete this document from the connector and PEKA?</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>The local file is removed immediately. PEKA deletion remains queued until acknowledged.</Typography></DialogContent><DialogActions><Button onClick={() => setDeleting(null)}>Cancel</Button><Button color="error" variant="contained" onClick={() => void remove()}>Delete</Button></DialogActions></Dialog>
+    <Dialog open={Boolean(deleting)} onClose={() => { if (!deletingBusy) setDeleting(null); }}><DialogTitle>Delete document?</DialogTitle><DialogContent><Typography fontWeight={600}>{deleting?.filename}</Typography><Typography sx={{ mt: 1 }}>This document will be removed from PEKA knowledge.</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>The local file is removed immediately. PEKA deletion remains queued until acknowledged.</Typography></DialogContent><DialogActions><Button disabled={deletingBusy} onClick={() => setDeleting(null)}>Cancel</Button><Button disabled={deletingBusy} color="error" variant="contained" onClick={() => void remove()}>{deletingBusy ? 'Deleting…' : 'Delete'}</Button></DialogActions></Dialog>
     </> : <SourceSettings />}
   </Stack>;
 }

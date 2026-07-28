@@ -269,7 +269,9 @@ class HeartbeatService:
                 else min(interval * (2 ** min(settings.heartbeat_failure_count, 4)), 3600)
             )
             await self._operations.heartbeat_failed(
-                str(exc), exc.authentication_failure, datetime.now(UTC) + timedelta(seconds=delay)
+                exc.failure_reason,
+                exc.authentication_failure,
+                datetime.now(UTC) + timedelta(seconds=delay),
             )
             raise
         response_interval = response.next_heartbeat_seconds
