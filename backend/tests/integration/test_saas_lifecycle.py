@@ -11,6 +11,7 @@ from app.application.services.saas import (
     validate_saas_url,
 )
 from app.core.config import get_settings
+from app.core.version import CONNECTOR_VERSION
 from app.domain.ports.saas import (
     ConnectorHeartbeatRequest,
     ConnectorHeartbeatResponse,
@@ -133,6 +134,7 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
 
         assert client.registration_request
         assert client.registration_request.connector_name == "Lifecycle Test"
+        assert client.registration_request.connector_version == CONNECTOR_VERSION
         heartbeat = HeartbeatService(operations, client, encryption, settings.environment)
         delivery = await heartbeat.send()
         assert delivery.next_delay_seconds == 180
@@ -147,6 +149,7 @@ async def test_registration_encrypts_secret_and_heartbeat_recovers() -> None:
         assert client.heartbeat_request
         assert client.heartbeat_request.name == "Lifecycle Test"
         assert client.heartbeat_request.environment == settings.environment
+        assert client.heartbeat_request.connector_version == CONNECTOR_VERSION
         connector_id = product.connector_id
         tenant_id = product.tenant_id
         instance_id = product.instance_id

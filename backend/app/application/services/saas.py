@@ -23,7 +23,10 @@ from app.infrastructure.database.models.operations import ProductSettingsModel
 from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
 from app.infrastructure.security.secrets import SecretEncryptionService
 
-CAPABILITIES: list[ConnectorCapabilityName] = ["filesystem_documents"]
+CAPABILITIES: list[ConnectorCapabilityName] = [
+    "filesystem_documents",
+    "operational_tools",
+]
 PROCESS_STARTED = time.monotonic()
 
 

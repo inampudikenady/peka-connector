@@ -1,3 +1,8 @@
+ARG PEKA_CONNECTOR_VERSION=0.3.0.dev0
+ARG PEKA_BUILD_REVISION=local
+ARG PEKA_BUILD_CREATED=unknown
+ARG PEKA_BUILD_SOURCE=local
+
 FROM node:22-alpine AS frontend-builder
 
 WORKDIR /build/frontend
@@ -9,27 +14,37 @@ RUN npm run build
 
 FROM python:3.13-slim AS backend-builder
 
+ARG PEKA_CONNECTOR_VERSION
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 WORKDIR /build/backend
 COPY backend/pyproject.toml ./
 COPY backend/app ./app
+COPY backend/scripts ./scripts
+RUN PYTHONPATH=. python scripts/prepare_build_version.py \
+    "${PEKA_CONNECTOR_VERSION}" pyproject.toml app/core/_build_version.py
 RUN python -m pip install --prefix=/install .
 
 
 FROM python:3.13-slim AS runtime
 
-ARG PEKA_BUILD_ID=local
+ARG PEKA_CONNECTOR_VERSION
+ARG PEKA_BUILD_REVISION
+ARG PEKA_BUILD_CREATED
+ARG PEKA_BUILD_SOURCE
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PEKA_DATABASE_URL=sqlite+aiosqlite:////data/state/peka.db \
     PEKA_DATA_ROOT=/data \
     PEKA_SOURCES_ROOT=/data/sources \
     PEKA_STATIC_ASSETS_DIR=/app/static \
-    PEKA_BUILD_ID=${PEKA_BUILD_ID}
+    PEKA_BUILD_ID=${PEKA_BUILD_REVISION}
 
 LABEL org.opencontainers.image.title="PEKA Connector" \
-      org.opencontainers.image.version="0.2.0"
+      org.opencontainers.image.version="${PEKA_CONNECTOR_VERSION}" \
+      org.opencontainers.image.revision="${PEKA_BUILD_REVISION}" \
+      org.opencontainers.image.created="${PEKA_BUILD_CREATED}" \
+      org.opencontainers.image.source="${PEKA_BUILD_SOURCE}"
 
 RUN groupadd --gid 10001 peka \
     && useradd --uid 10001 --gid peka --no-create-home peka
@@ -37,6 +52,7 @@ RUN groupadd --gid 10001 peka \
 WORKDIR /app
 COPY --from=backend-builder /install /usr/local
 COPY --chown=peka:peka backend/app ./app
+COPY --from=backend-builder --chown=peka:peka /build/backend/app/core/_build_version.py ./app/core/_build_version.py
 COPY --chown=peka:peka backend/alembic ./alembic
 COPY --chown=peka:peka backend/alembic.ini ./alembic.ini
 COPY --chown=peka:peka backend/docker-entrypoint.sh ./docker-entrypoint.sh

@@ -9,6 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import
 from sqlalchemy import select, update
 
 from app.application.services.documents import DocumentDeliveryWorker, ManagedDocumentService
+from app.application.services.operational_tools import OperationalToolWorker
 from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import HeartbeatService, RegistrationStateError
 from app.application.services.sources import ScanInProgressError, SourceService
@@ -66,6 +67,7 @@ class ConnectorScheduler:
         self._manual_heartbeat_retry_claimed = False
         self._document_reconcile_lock = Lock()
         self._document_worker_lock = Lock()
+        self._operational_tool_lock = Lock()
 
     @property
     def running(self) -> bool:
@@ -133,6 +135,17 @@ class ConnectorScheduler:
         logger.info(
             "Managed document jobs registered",
             extra={"recovered_stale_jobs": recovered},
+        )
+        self._scheduler.add_job(
+            self._run_operational_tool,
+            IntervalTrigger(
+                seconds=settings.operational_tool_poll_interval_seconds,
+                timezone=UTC,
+            ),
+            id="operational-tools:poll",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
         )
         async with session_factory() as session:
             product = await SqlAlchemyOperationsRepository(session).get_settings()
@@ -367,6 +380,32 @@ class ConnectorScheduler:
                     await worker.run_once()
                 except Exception:
                     logger.exception("Document delivery worker failed unexpectedly")
+
+    async def _run_operational_tool(self) -> None:
+        if self._operational_tool_lock.locked():
+            return
+        async with self._operational_tool_lock:
+            settings = get_settings()
+            async with session_factory() as session:
+                worker = OperationalToolWorker(
+                    session,
+                    settings,
+                    HttpxPEKASaaSClient(
+                        settings.saas_connect_timeout_seconds,
+                        settings.saas_read_timeout_seconds,
+                        settings.tls_verify,
+                    ),
+                    SecretEncryptionService(settings.encryption_key),
+                )
+                try:
+                    await worker.run_once()
+                except SaaSClientError as exc:
+                    logger.warning(
+                        "Operational tool polling failed safely: %s",
+                        exc,
+                    )
+                except Exception:
+                    logger.exception("Operational tool worker failed unexpectedly")
 
     async def _run_source_scan(self, source_id: UUID) -> None:
         logger.info("Scheduled source scan executing", extra={"source_id": str(source_id)})

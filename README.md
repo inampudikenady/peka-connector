@@ -136,6 +136,9 @@ docker compose config
 docker compose build
 ```
 
+Release builds must set one canonical connector version and pass it through Compose. See the
+[release procedure](docs/release.md) for version validation, image labels, and runtime checks.
+
 See [architecture](docs/architecture.md), [managed documents](docs/documents.md), [database](docs/database.md), [plugins](docs/plugins.md), [security](docs/security.md), [installation](docs/installation.md), [PEKA registration](docs/saas-registration.md), [local development](docs/local-development.md), [troubleshooting](docs/troubleshooting.md), [lifecycle E2E](docs/e2e-lifecycle-test.md), [roadmap](docs/roadmap.md), and [ADRs](docs/adr/).
 
 ## License

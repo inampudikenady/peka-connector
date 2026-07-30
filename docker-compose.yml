@@ -1,8 +1,16 @@
+x-peka-build: &peka-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    PEKA_CONNECTOR_VERSION: ${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
+    PEKA_BUILD_REVISION: ${PEKA_BUILD_REVISION:-local}
+    PEKA_BUILD_CREATED: ${PEKA_BUILD_CREATED:-unknown}
+    PEKA_BUILD_SOURCE: ${PEKA_BUILD_SOURCE:-local}
+
 services:
   volume-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *peka-build
+    image: peka-connector:${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -25,9 +33,8 @@ services:
     restart: "no"
 
   connector:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *peka-build
+    image: peka-connector:${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
     restart: unless-stopped
     environment:
       PEKA_ENVIRONMENT: production

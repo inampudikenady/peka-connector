@@ -3,6 +3,8 @@ export type Role = 'administrator' | 'read_only';
 export interface CurrentUser { id: string; username: string; role: Role }
 export interface SetupStatus { setup_required: boolean }
 export interface LoginResponse { access_token: string; expires_in: number; token_type: 'bearer' }
+export interface Health { status: 'healthy'; version: string }
+export type CMDBImportMode = 'create_new' | 'new_version';
 
 export interface CMDBDataset {
   id: string; name: string; status: string; current_version_id: string | null;

@@ -1,7 +1,7 @@
 import type {
-  CurrentUser, Diagnostics, LocalUser, LoginResponse, Overview, PaginatedActivity,
+  CurrentUser, Diagnostics, Health, LocalUser, LoginResponse, Overview, PaginatedActivity,
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
-  CMDBDataset, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
+  CMDBDataset, CMDBImportMode, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
   PrometheusDiagnostics, TrustedCertificateAuthority,
 } from './types';
 
@@ -81,6 +81,7 @@ async function download(path: string, filename: string): Promise<void> {
 
 export const api = {
   setUnauthorizedHandler: (handler: () => void) => { unauthorizedHandler = handler; },
+  health: (): Promise<Health> => request('/health'),
   setupStatus: (): Promise<SetupStatus> => request('/auth/setup-status'),
   bootstrap: (username: string, password: string, confirmPassword: string): Promise<CurrentUser> =>
     request('/auth/bootstrap', { method: 'POST', body: JSON.stringify({ username, password, confirm_password: confirmPassword }) }),
@@ -139,8 +140,9 @@ export const api = {
   cmdbFields: (): Promise<{ fields: string[]; identity_fields: string[] }> => request('/cmdb/fields'),
   cmdbDatasets: (): Promise<CMDBDataset[]> => request('/cmdb/datasets'),
   cmdbRecords: (query: string): Promise<PaginatedCMDBRecords> => request(`/cmdb/records?${query}`),
-  uploadCMDB(file: File, datasetName: string, datasetId?: string): Promise<CMDBUpload> {
+  uploadCMDB(file: File, datasetName: string, importMode: CMDBImportMode, datasetId?: string): Promise<CMDBUpload> {
     const form = new FormData(); form.append('file', file, file.name); form.append('dataset_name', datasetName);
+    form.append('import_mode', importMode);
     if (datasetId) form.append('dataset_id', datasetId);
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/v1/cmdb/upload');
@@ -149,8 +151,15 @@ export const api = {
       xhr.onload = () => {
         let body: unknown = null; try { body = JSON.parse(xhr.responseText); } catch { body = null; }
         if (xhr.status >= 200 && xhr.status < 300) { resolve(body as CMDBUpload); return; }
-        const error = body as { detail?: unknown; code?: unknown } | null;
-        reject(new ApiError(typeof error?.detail === 'string' ? error.detail : 'CMDB upload failed', xhr.status, typeof error?.code === 'string' ? error.code : undefined));
+        const error = body as { detail?: unknown; message?: unknown; code?: unknown } | null;
+        const message = typeof error?.message === 'string'
+          ? error.message
+          : typeof error?.detail === 'string'
+            ? error.detail
+            : Array.isArray(error?.detail)
+              ? error.detail.map((item) => (item as { msg?: string }).msg ?? 'Invalid value').join('. ')
+              : 'CMDB upload failed';
+        reject(new ApiError(message, xhr.status, typeof error?.code === 'string' ? error.code : undefined));
       };
       xhr.send(form);
     });

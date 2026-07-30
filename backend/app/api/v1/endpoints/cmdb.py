@@ -5,6 +5,7 @@ from fastapi import APIRouter, File, Form, Query, Response, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import Administrator, CMDBServiceDep, CurrentUser, OperationsDep
+from app.application.services.cmdb import CMDBError
 from app.core.rate_limit import auth_rate_limiter
 
 router = APIRouter()
@@ -49,8 +50,24 @@ async def upload(
     operations: OperationsDep,
     file: Annotated[UploadFile, File()],
     dataset_name: Annotated[str, Form()],
+    import_mode: Annotated[str, Form()] = "create_new",
     dataset_id: Annotated[UUID | None, Form()] = None,
 ) -> dict[str, object]:
+    if import_mode not in {"create_new", "new_version"}:
+        raise CMDBError(
+            "UNSUPPORTED_IMPORT_MODE",
+            "The selected CMDB import mode is not supported.",
+        )
+    if import_mode == "create_new" and dataset_id is not None:
+        raise CMDBError(
+            "INVALID_IMPORT_MODE",
+            "Create new dataset cannot target an existing dataset.",
+        )
+    if import_mode == "new_version" and dataset_id is None:
+        raise CMDBError(
+            "INVALID_IMPORT_MODE",
+            "Select an existing dataset when importing a new version.",
+        )
     correlation_id = str(uuid4())
     auth_rate_limiter.check(f"cmdb-upload:{actor.id}", limit=20, window_seconds=60)
     await operations.record_event(

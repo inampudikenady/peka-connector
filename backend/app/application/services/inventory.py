@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database.models.inventory import (
@@ -26,6 +26,7 @@ IDENTITY_PRIORITY = (
     "serial_number",
     "asset_tag",
     "fqdn",
+    "alias",
     "hostname",
     "ip_address",
 )
@@ -48,6 +49,7 @@ CMDB_FIELDS = (
     "cloud_instance_id",
     "lifecycle_status",
     "description",
+    "aliases",
 )
 IDENTITY_FIELDS = (
     "cloud_instance_id",
@@ -114,6 +116,15 @@ def split_addresses(value: object) -> list[str]:
     return normalized
 
 
+def split_aliases(value: object) -> list[str]:
+    if isinstance(value, list):
+        values = value
+    else:
+        text = clean_text(value)
+        values = [] if text is None else text.replace(";", ",").split(",")
+    return list(dict.fromkeys(item.strip() for item in values if str(item).strip()))
+
+
 def endpoint_identity(value: object) -> tuple[str | None, str | None]:
     text = clean_text(value)
     if not text:
@@ -162,6 +173,8 @@ def normalize_cmdb_row(
                 errors.append("primary_ip is invalid")
         elif field == "additional_ips":
             normalized[field] = split_addresses(value)
+        elif field == "aliases":
+            normalized[field] = split_aliases(value)
         else:
             normalized[field] = clean_text(value)
     if not any(normalized.get(field) for field in IDENTITY_FIELDS):
@@ -199,6 +212,14 @@ def identities_from_fields(fields: dict[str, Any]) -> list[tuple[str, str, str]]
             results.append((identity_type, original, normalized))
     for address in split_addresses(fields.get("additional_ips")):
         results.append(("ip_address", address, address))
+    for alias in split_aliases(fields.get("aliases")):
+        _, normalized_ip = normalize_ip(alias)
+        if normalized_ip:
+            results.append(("alias", alias, normalized_ip))
+            continue
+        _, normalized_host = endpoint_identity(alias)
+        if normalized_host:
+            results.append(("alias", alias, normalized_host))
     return list(dict.fromkeys(results))
 
 
@@ -289,13 +310,21 @@ class InventoryService:
             await self._replace_identities(observation, None, identities)
             return
         candidates: dict[UUID, set[str]] = {}
-        for identity_type in IDENTITY_PRIORITY:
-            for kind, _, normalized in identities:
-                if kind != identity_type:
-                    continue
+        candidate_priority: int | None = None
+        for priority, identity_type in enumerate(IDENTITY_PRIORITY):
+            values = (
+                {normalized for _, _, normalized in identities}
+                if identity_type == "alias"
+                else {
+                    normalized
+                    for kind, _, normalized in identities
+                    if kind == identity_type
+                }
+            )
+            for normalized in values:
                 rows = await self.session.execute(
                     select(InventoryIdentityModel.asset_id).where(
-                        InventoryIdentityModel.identity_type == kind,
+                        InventoryIdentityModel.identity_type == identity_type,
                         InventoryIdentityModel.normalized_value == normalized,
                         InventoryIdentityModel.asset_id.is_not(None),
                         InventoryIdentityModel.source_type == "cmdb",
@@ -303,21 +332,47 @@ class InventoryService:
                 )
                 for asset_id in rows.scalars():
                     if asset_id:
-                        candidates.setdefault(asset_id, set()).add(kind)
+                        candidates.setdefault(asset_id, set()).add(identity_type)
             if candidates:
+                candidate_priority = priority
                 break
         all_exact: dict[str, set[UUID]] = {}
-        for kind, _, normalized in identities:
+        for kind in (*IDENTITY_PRIORITY,):
+            values = (
+                {normalized for _, _, normalized in identities}
+                if kind == "alias"
+                else {
+                    normalized
+                    for identity_type, _, normalized in identities
+                    if identity_type == kind
+                }
+            )
+            if not values:
+                continue
             scalar_rows = await self.session.scalars(
                 select(InventoryIdentityModel.asset_id).where(
                     InventoryIdentityModel.identity_type == kind,
-                    InventoryIdentityModel.normalized_value == normalized,
+                    InventoryIdentityModel.normalized_value.in_(values),
                     InventoryIdentityModel.asset_id.is_not(None),
                     InventoryIdentityModel.source_type == "cmdb",
                 )
             )
             all_exact[kind] = {item for item in scalar_rows.all() if item}
-        nonempty = [values for values in all_exact.values() if values]
+        # A unique strong identity must not be invalidated by a weaker shared
+        # address. For example, many exporters can share a host IP while an
+        # instance_name FQDN still identifies exactly one CMDB asset. Conflicts
+        # between strong identifiers remain ambiguous.
+        conflict_ceiling = (
+            max(candidate_priority, IDENTITY_PRIORITY.index("fqdn"))
+            if candidate_priority is not None
+            else len(IDENTITY_PRIORITY) - 1
+        )
+        nonempty = [
+            values
+            for priority, kind in enumerate(IDENTITY_PRIORITY)
+            if priority <= conflict_ceiling
+            and (values := all_exact.get(kind, set()))
+        ]
         conflicting = len({asset_id for values in nonempty for asset_id in values}) > 1
         if len(candidates) == 1 and not conflicting:
             asset_id = next(iter(candidates))
@@ -792,6 +847,159 @@ class InventoryService:
         total = len(results)
         start = (page - 1) * page_size
         return results[start : start + page_size], total
+
+    @staticmethod
+    def _os_condition(os_family: str) -> Any:
+        family = os_family.casefold()
+        operating_system = func.lower(InventoryAssetModel.operating_system)
+        if family == "linux":
+            return or_(
+                operating_system.contains("linux"),
+                operating_system.contains("rhel"),
+                operating_system.contains("red hat"),
+                operating_system.contains("ubuntu"),
+                operating_system.contains("debian"),
+                operating_system.contains("centos"),
+                operating_system.contains("suse"),
+            )
+        if family == "windows":
+            return operating_system.contains("windows")
+        return operating_system.contains(family.replace("%", "\\%").replace("_", "\\_"))
+
+    async def count_assets(self, os_family: str | None = None) -> dict[str, Any]:
+        filters: list[Any] = [InventoryAssetModel.retired_at.is_(None)]
+        if os_family:
+            filters.append(self._os_condition(os_family))
+        count = int(
+            await self.session.scalar(
+                select(func.count(InventoryAssetModel.id)).where(*filters)
+            )
+            or 0
+        )
+        return {
+            "count": count,
+            "filters": {"os_family": os_family} if os_family else {},
+            "observed_at": datetime.now(UTC),
+        }
+
+    async def inventory_summary(self) -> dict[str, Any]:
+        total = await self.count_assets()
+        linux = await self.count_assets("linux")
+        windows = await self.count_assets("windows")
+        return {
+            "total_count": total["count"],
+            "counts_by_os_family": {
+                "linux": linux["count"],
+                "windows": windows["count"],
+                "other_or_unknown": max(
+                    0, total["count"] - linux["count"] - windows["count"]
+                ),
+            },
+            "observed_at": total["observed_at"],
+        }
+
+    async def find_assets(
+        self,
+        *,
+        identifier: str | None = None,
+        os_family: str | None = None,
+        environment: str | None = None,
+        missing_prometheus: bool | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        filters: list[Any] = [InventoryAssetModel.retired_at.is_(None)]
+        if identifier:
+            clean = identifier.strip().rstrip(".").casefold()
+            short = clean.split(".", 1)[0]
+            filters.append(
+                or_(
+                    func.lower(InventoryAssetModel.hostname) == short,
+                    func.lower(InventoryAssetModel.fqdn) == clean,
+                    func.lower(InventoryAssetModel.canonical_name) == clean,
+                    func.lower(InventoryAssetModel.canonical_name) == short,
+                    InventoryAssetModel.primary_ip == identifier.strip(),
+                )
+            )
+        if os_family:
+            filters.append(self._os_condition(os_family))
+        if environment:
+            filters.append(func.lower(InventoryAssetModel.environment) == environment.casefold())
+        assets = list(
+            (
+                await self.session.scalars(
+                    select(InventoryAssetModel)
+                    .where(*filters)
+                    .order_by(InventoryAssetModel.canonical_name)
+                    .limit(limit)
+                )
+            ).all()
+        )
+        results: list[dict[str, Any]] = []
+        for asset in assets:
+            observations = list(
+                (
+                    await self.session.scalars(
+                        select(InventoryObservationModel).where(
+                            InventoryObservationModel.asset_id == asset.id
+                        )
+                    )
+                ).all()
+            )
+            prometheus = [
+                item for item in observations if item.source_type == "prometheus"
+            ]
+            if missing_prometheus is True and prometheus:
+                continue
+            if missing_prometheus is False and not prometheus:
+                continue
+            health = (
+                "unhealthy"
+                if any(item.observed_fields_json.get("health") != "up" for item in prometheus)
+                else "healthy"
+                if prometheus
+                else "unavailable"
+            )
+            results.append(
+                {
+                    "id": str(asset.id),
+                    "canonical_name": asset.canonical_name,
+                    "hostname": asset.hostname,
+                    "fqdn": asset.fqdn,
+                    "primary_ip": asset.primary_ip,
+                    "operating_system": asset.operating_system,
+                    "environment": asset.environment,
+                    "asset_type": asset.asset_type,
+                    "lifecycle_status": asset.lifecycle_status,
+                    "prometheus_health": health,
+                    "last_observed_at": max(
+                        (item.last_seen_at for item in observations), default=None
+                    ),
+                    "last_metrics_seen_at": max(
+                        (item.last_seen_at for item in prometheus), default=None
+                    ),
+                }
+            )
+        return results
+
+    async def operational_asset_status(self, asset_id: UUID) -> dict[str, Any] | None:
+        asset = await self.session.get(InventoryAssetModel, asset_id)
+        if asset is None or asset.retired_at is not None:
+            return None
+        matches = await self.find_assets(identifier=asset.canonical_name, limit=20)
+        item = next((value for value in matches if value["id"] == str(asset.id)), None)
+        if item is None:
+            return None
+        return {
+            **item,
+            "inventory_status": asset.lifecycle_status or "unknown",
+            "reachable": (
+                True
+                if item["prometheus_health"] == "healthy"
+                else False
+                if item["prometheus_health"] == "unhealthy"
+                else None
+            ),
+        }
 
     async def asset_detail(self, asset_id: UUID) -> dict[str, Any] | None:
         asset = await self.session.get(InventoryAssetModel, asset_id)

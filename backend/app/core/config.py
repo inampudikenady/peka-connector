@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     document_stability_seconds: int = Field(default=5, ge=1, le=300)
     document_reconcile_interval_seconds: int = Field(default=300, ge=10, le=86400)
     document_worker_interval_seconds: int = Field(default=5, ge=1, le=300)
+    operational_tool_poll_interval_seconds: int = Field(default=2, ge=1, le=30)
     document_job_max_attempts: int = Field(default=8, ge=1, le=100)
     cmdb_max_file_size_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     cmdb_max_row_count: int = Field(default=100_000, ge=1, le=1_000_000)

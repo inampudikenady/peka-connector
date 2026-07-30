@@ -83,6 +83,11 @@ class SPAStaticFiles(StaticFiles):
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logger.info(
+        "PEKA Connector starting version=%s environment=%s",
+        CONNECTOR_VERSION,
+        settings.environment,
+    )
     async with session_factory() as session:
         await ManagedDocumentService(session, settings).ensure_managed_source()
         operations = SqlAlchemyOperationsRepository(session)

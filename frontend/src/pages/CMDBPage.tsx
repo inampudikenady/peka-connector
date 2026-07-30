@@ -13,9 +13,43 @@ import type { CMDBDataset, CMDBRecord, CMDBUpload } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { LoadingState } from '../components/LoadingState';
 import { useToast } from '../components/ToastProvider';
+import { cmdbImportMode } from '../utils/cmdb';
 import { formatTimestamp, relativeTimestamp } from '../utils/time';
 
 const defaultColumns = ['hostname', 'fqdn', 'primary_ip', 'asset_type', 'environment', 'operating_system', 'application', 'business_owner', 'technical_owner', 'lifecycle_status'];
+
+export function CMDBImportModeField({
+  datasets,
+  selectedDatasetId,
+  onChange,
+}: {
+  datasets: CMDBDataset[];
+  selectedDatasetId: string;
+  onChange: (datasetId: string) => void;
+}) {
+  const value = selectedDatasetId || 'create_new';
+  return (
+    <FormControl fullWidth>
+      <InputLabel id="cmdb-import-mode-label">Import mode</InputLabel>
+      <Select
+        labelId="cmdb-import-mode-label"
+        id="cmdb-import-mode"
+        label="Import mode"
+        value={value}
+        disabled={datasets.length === 0}
+        onChange={(event) =>
+          onChange(event.target.value === 'create_new' ? '' : event.target.value)
+        }
+        inputProps={{ 'aria-label': 'Import mode' }}
+      >
+        <MenuItem value="create_new">Create new dataset</MenuItem>
+        {datasets.map((item) => (
+          <MenuItem key={item.id} value={item.id}>New version of {item.name}</MenuItem>
+        ))}
+      </Select>
+    </FormControl>
+  );
+}
 
 export function CMDBPage() {
   const { user } = useAuth();
@@ -65,7 +99,12 @@ export function CMDBPage() {
     if (!file || !datasetName.trim()) return;
     try {
       setBusy(true);
-      const result = await api.uploadCMDB(file, datasetName.trim(), replaceId || undefined);
+      const result = await api.uploadCMDB(
+        file,
+        datasetName.trim(),
+        cmdbImportMode(replaceId),
+        replaceId || undefined,
+      );
       setDraft(result); setSheet(result.sheets[0] ?? null); setHeaderRow(result.header_row);
       setMapping(result.suggested_mapping); setPreview(result.preview_rows); setTab(1);
       toast.show('CMDB file uploaded and parsed safely.', 'success');
@@ -109,8 +148,8 @@ export function CMDBPage() {
     </Stack>)}
     {tab === 1 && admin && <Stack spacing={2}>
       {!draft ? <Paper variant="outlined" sx={{ p: 3 }}><Stack spacing={2}>
-        <TextField label="Dataset name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)} required />
-        <FormControl><InputLabel>Import mode</InputLabel><Select label="Import mode" value={replaceId} onChange={(event) => { setReplaceId(event.target.value); const item = datasets.find((dataset) => dataset.id === event.target.value); if (item) setDatasetName(item.name); }}><MenuItem value="">Create new dataset</MenuItem>{datasets.map((item) => <MenuItem key={item.id} value={item.id}>New version of {item.name}</MenuItem>)}</Select></FormControl>
+        <TextField label="Dataset name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)} required helperText={!datasetName.trim() ? 'Dataset name is required.' : ' '} />
+        <CMDBImportModeField datasets={datasets} selectedDatasetId={replaceId} onChange={(datasetId) => { setReplaceId(datasetId); const item = datasets.find((dataset) => dataset.id === datasetId); setDatasetName(item?.name ?? ''); }} />
         <input ref={input} hidden type="file" accept=".csv,.xlsx" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
         <Button variant="outlined" onClick={() => input.current?.click()}>{file ? file.name : 'Choose CSV or XLSX'}</Button>
         <Alert severity="info">Files are stored under the managed CMDB source directory. Formulas and external workbook links are never executed or fetched.</Alert>

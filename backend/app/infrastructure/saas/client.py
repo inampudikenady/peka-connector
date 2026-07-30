@@ -17,6 +17,8 @@ from app.domain.ports.saas import (
     ConnectorRegistrationResponse,
     DocumentDeliveryMetadata,
     DocumentDeliveryResponse,
+    OperationalToolRequest,
+    OperationalToolResult,
     SaaSClientError,
 )
 
@@ -185,6 +187,63 @@ class HttpxPEKASaaSClient:
 
     async def receive_commands(self) -> None:
         raise NotImplementedError("Command polling is outside this vertical slice")
+
+    async def claim_operational_tool(
+        self,
+        base_url: str,
+        connector_id: UUID,
+        connector_secret: str,
+    ) -> OperationalToolRequest | None:
+        url = (
+            f"{base_url.rstrip('/')}/api/v1/connectors/{connector_id}"
+            "/operational-tools/requests/next"
+        )
+        headers = {
+            "Authorization": f"Bearer {connector_secret}",
+            "X-PEKA-Connector-ID": str(connector_id),
+        }
+        async with self._client() as client:
+            try:
+                response = await client.get(url, headers=headers)
+            except httpx.HTTPError as exc:
+                self._raise_transport(exc)
+        if response.status_code == 204:
+            return None
+        if not response.is_success:
+            self._raise_status(response.status_code, "operational_tool_claim")
+        try:
+            return OperationalToolRequest.model_validate(response.json())
+        except (ValidationError, ValueError) as exc:
+            raise SaaSClientError(
+                "malformed_response",
+                "PEKA returned an invalid operational tool request",
+            ) from exc
+
+    async def submit_operational_tool_result(
+        self,
+        base_url: str,
+        connector_id: UUID,
+        connector_secret: str,
+        request_id: UUID,
+        result: OperationalToolResult,
+    ) -> None:
+        url = (
+            f"{base_url.rstrip('/')}/api/v1/connectors/{connector_id}"
+            f"/operational-tools/requests/{request_id}/result"
+        )
+        headers = {
+            "Authorization": f"Bearer {connector_secret}",
+            "X-PEKA-Connector-ID": str(connector_id),
+        }
+        async with self._client() as client:
+            try:
+                response = await client.post(
+                    url, headers=headers, json=result.model_dump(mode="json")
+                )
+            except httpx.HTTPError as exc:
+                self._raise_transport(exc)
+        if not response.is_success:
+            self._raise_status(response.status_code, "operational_tool_result")
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(

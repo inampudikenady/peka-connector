@@ -2,12 +2,13 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 import ssl
 import time
 from datetime import UTC, datetime
 from typing import Any, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 from uuid import UUID
 
 import httpx
@@ -24,6 +25,7 @@ from app.application.services.inventory import (
 from app.core.config import Settings, get_settings
 from app.core.logging import sanitize
 from app.infrastructure.database.models.inventory import (
+    InventoryAssetModel,
     InventoryObservationModel,
     PrometheusConfigurationModel,
 )
@@ -412,6 +414,96 @@ class PrometheusService:
         configuration = await self._get(configuration_id)
         await self.session.delete(configuration)
         await self.session.commit()
+
+    async def asset_utilization(self, asset: InventoryAssetModel) -> dict[str, Any]:
+        """Execute only fixed, parameterized node-exporter utilization queries."""
+        configuration = await self.session.scalar(
+            select(PrometheusConfigurationModel)
+            .where(PrometheusConfigurationModel.enabled.is_(True))
+            .order_by(PrometheusConfigurationModel.last_successful_scan_at.desc())
+            .limit(1)
+        )
+        if configuration is None:
+            return {
+                "asset_id": str(asset.id),
+                "asset": asset.canonical_name,
+                "cpu_percent": None,
+                "memory_percent": None,
+                "disk_percent": None,
+                "metric_timestamp": None,
+                "unavailable_reason": "Prometheus is not configured.",
+            }
+        identities = [
+            value
+            for value in (asset.hostname, asset.fqdn, asset.canonical_name, asset.primary_ip)
+            if value
+        ]
+        if not identities:
+            return {
+                "asset_id": str(asset.id),
+                "asset": asset.canonical_name,
+                "cpu_percent": None,
+                "memory_percent": None,
+                "disk_percent": None,
+                "metric_timestamp": None,
+                "unavailable_reason": "The asset has no Prometheus-compatible identity.",
+            }
+        instance_pattern = (
+            "^(?:"
+            + "|".join(re.escape(value) for value in identities)
+            + ")(?::\\d+)?$"
+        )
+        selector = f'instance=~"{instance_pattern}"'
+        expressions = {
+            "cpu_percent": (
+                "100 - (avg by (instance) "
+                f"(rate(node_cpu_seconds_total{{mode=\"idle\",{selector}}}[5m])) * 100)"
+            ),
+            "memory_percent": (
+                f"(1 - (node_memory_MemAvailable_bytes{{{selector}}} / "
+                f"node_memory_MemTotal_bytes{{{selector}}})) * 100"
+            ),
+            "disk_percent": (
+                "max by (instance) ((1 - "
+                f"(node_filesystem_avail_bytes{{{selector},fstype!~=\"tmpfs|overlay|squashfs\"}} / "
+                f"node_filesystem_size_bytes{{{selector},"
+                "fstype!~=\"tmpfs|overlay|squashfs\"})) * 100)"
+            ),
+        }
+        result: dict[str, Any] = {
+            "asset_id": str(asset.id),
+            "asset": asset.canonical_name,
+            "cpu_percent": None,
+            "memory_percent": None,
+            "disk_percent": None,
+            "metric_timestamp": None,
+            "unavailable_reason": None,
+        }
+        timestamps: list[datetime] = []
+        for field, expression in expressions.items():
+            payload = await self._request(
+                configuration,
+                "/api/v1/query?" + urlencode({"query": expression}),
+            )
+            series = payload.get("data", {}).get("result")
+            if not isinstance(series, list) or not series:
+                continue
+            value = series[0].get("value") if isinstance(series[0], dict) else None
+            if not isinstance(value, list) or len(value) != 2:
+                continue
+            try:
+                timestamp = datetime.fromtimestamp(float(value[0]), UTC)
+                numeric = round(float(value[1]), 2)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            result[field] = numeric
+            timestamps.append(timestamp)
+        result["metric_timestamp"] = max(timestamps) if timestamps else None
+        if not timestamps:
+            result["unavailable_reason"] = (
+                "Prometheus returned no matching node-exporter utilization metrics."
+            )
+        return result
 
     async def _request(
         self, configuration: PrometheusConfigurationModel, path: str

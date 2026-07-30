@@ -53,7 +53,10 @@ def _upload_csv(
     dataset_name: str = "Servers",
     dataset_id: str | None = None,
 ) -> dict[str, Any]:
-    data = {"dataset_name": dataset_name}
+    data = {
+        "dataset_name": dataset_name,
+        "import_mode": "new_version" if dataset_id else "create_new",
+    }
     if dataset_id:
         data["dataset_id"] = dataset_id
     response = client.post(
@@ -64,6 +67,30 @@ def _upload_csv(
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_cmdb_import_mode_validation(client: TestClient) -> None:
+    headers = _headers(client)
+    unsupported = client.post(
+        "/api/v1/cmdb/upload",
+        headers=headers,
+        data={"dataset_name": "Servers", "import_mode": "append"},
+        files={"file": ("servers.csv", b"Hostname\nweb01\n", "text/csv")},
+    )
+    assert unsupported.status_code == 422
+    assert unsupported.json() == {
+        "code": "UNSUPPORTED_IMPORT_MODE",
+        "message": "The selected CMDB import mode is not supported.",
+        "detail": "The selected CMDB import mode is not supported.",
+    }
+    missing_dataset = client.post(
+        "/api/v1/cmdb/upload",
+        headers=headers,
+        data={"dataset_name": "Servers", "import_mode": "new_version"},
+        files={"file": ("servers.csv", b"Hostname\nweb01\n", "text/csv")},
+    )
+    assert missing_dataset.status_code == 422
+    assert missing_dataset.json()["code"] == "INVALID_IMPORT_MODE"
 
 
 def _import(
@@ -356,3 +383,122 @@ def test_prometheus_collection_exact_match_and_manual_decision_persistence(
     client.post(f"/api/v1/prometheus/configurations/{configuration_id}/scan", headers=headers)
     inventory = client.get("/api/v1/inventory?page=1&page_size=25", headers=headers).json()
     assert any(item["correlation_status"] == "unmatched" for item in inventory["items"])
+
+
+def test_prometheus_instance_name_fqdn_matches_unambiguous_short_hostname(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _headers(client)
+    upload = _upload_csv(
+        client,
+        headers,
+        (
+            b"Hostname,Aliases,IP\n"
+            b"util001,,192.0.2.10\n"
+            b"canonical02,metrics02.demo.internal,192.0.2.11\n"
+            b"shared-ip,,192.0.2.10\n"
+        ),
+    )
+    _import(
+        client,
+        headers,
+        upload,
+        {"Hostname": "hostname", "Aliases": "aliases", "IP": "primary_ip"},
+    )
+
+    async def fake_request(
+        self: PrometheusService, configuration: object, path: str
+    ) -> dict[str, Any]:
+        if "buildinfo" in path:
+            return {"status": "success", "data": {"version": "3.0.0"}}
+        return {
+            "status": "success",
+            "data": {
+                "activeTargets": [
+                    {
+                        "scrapePool": "node",
+                        "scrapeUrl": "http://192.0.2.10:9100/metrics",
+                        "globalUrl": "http://prometheus:9090/graph",
+                        "labels": {
+                            "instance": "192.0.2.10:9100",
+                            "instance_name": "util001.demo.internal",
+                            "job": "node",
+                        },
+                        "discoveredLabels": {},
+                        "health": "up",
+                        "lastScrape": "2026-07-27T12:00:00Z",
+                        "lastScrapeDuration": 0.01,
+                        "lastError": "",
+                    },
+                    {
+                        "scrapePool": "node",
+                        "scrapeUrl": "http://192.0.2.11:9100/metrics",
+                        "globalUrl": "http://prometheus:9090/graph",
+                        "labels": {
+                            "instance": "192.0.2.11:9100",
+                            "instance_name": "metrics02.demo.internal",
+                            "job": "node",
+                        },
+                        "discoveredLabels": {},
+                        "health": "up",
+                        "lastScrape": "2026-07-27T12:00:00Z",
+                        "lastScrapeDuration": 0.01,
+                        "lastError": "",
+                    },
+                ]
+            },
+        }
+
+    monkeypatch.setattr(PrometheusService, "_request", fake_request)
+    created = client.post(
+        "/api/v1/prometheus/configurations",
+        headers=headers,
+        json={
+            "name": "Util Prometheus",
+            "base_url": "http://prometheus.internal:9090",
+            "auth_type": "none",
+            "tls_verify": True,
+            "request_timeout_seconds": 5,
+            "scan_interval_seconds": 300,
+            "enabled": True,
+        },
+    )
+    configuration_id = created.json()["id"]
+    scan = client.post(
+        f"/api/v1/prometheus/configurations/{configuration_id}/scan", headers=headers
+    )
+
+    assert scan.status_code == 200, scan.text
+    assert scan.json()["unmatched_target_count"] == 0
+    inventory = client.get(
+        "/api/v1/inventory?page=1&page_size=25", headers=headers
+    ).json()
+    assert inventory["total"] == 3
+    by_name = {item["canonical_name"]: item for item in inventory["items"]}
+    assert by_name["util001"]["prometheus_health"] == "healthy"
+    assert by_name["util001"]["sources"] == ["cmdb", "prometheus"]
+    assert by_name["canonical02"]["prometheus_health"] == "healthy"
+    assert by_name["canonical02"]["sources"] == ["cmdb", "prometheus"]
+
+    ambiguous_upload = _upload_csv(
+        client,
+        headers,
+        b"Hostname,FQDN\nutil001,util001.other.internal\n",
+        dataset_name="Other Servers",
+    )
+    _import(
+        client,
+        headers,
+        ambiguous_upload,
+        {"Hostname": "hostname", "FQDN": "fqdn"},
+    )
+    ambiguous_scan = client.post(
+        f"/api/v1/prometheus/configurations/{configuration_id}/scan", headers=headers
+    )
+    assert ambiguous_scan.json()["ambiguous_target_count"] == 1
+    inventory = client.get(
+        "/api/v1/inventory?page=1&page_size=25&correlation_status=ambiguous",
+        headers=headers,
+    ).json()
+    assert inventory["total"] == 1
+    assert inventory["items"][0]["correlation_status"] == "ambiguous"

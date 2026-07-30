@@ -12,6 +12,7 @@ from app.domain.ports.saas import (
     ConnectorHeartbeatRequest,
     ConnectorRegistrationRequest,
     DocumentDeliveryMetadata,
+    OperationalToolResult,
     SaaSClientError,
     SourceHeartbeatSummary,
 )
@@ -27,7 +28,7 @@ def heartbeat_request() -> ConnectorHeartbeatRequest:
         instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
         name="PEKA Connector",
         environment="production",
-        connector_version="0.2.0",
+        connector_version="1.2.3",
         timestamp=datetime(2026, 7, 20, 12, tzinfo=UTC),
         status="healthy",
         uptime_seconds=123,
@@ -218,7 +219,7 @@ async def test_final_registration_contract_serialization_and_response() -> None:
         ConnectorRegistrationRequest(
             registration_token="one-time-registration-token",
             connector_name="PEKA Connector",
-            connector_version="0.2.0",
+            connector_version="1.2.3",
             environment="production",
             instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
             capabilities=["filesystem_documents"],
@@ -229,7 +230,7 @@ async def test_final_registration_contract_serialization_and_response() -> None:
         "body": {
             "registration_token": "one-time-registration-token",
             "connector_name": "PEKA Connector",
-            "connector_version": "0.2.0",
+            "connector_version": "1.2.3",
             "environment": "production",
             "instance_id": "41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
             "capabilities": ["filesystem_documents"],
@@ -246,7 +247,7 @@ async def test_registration_rejects_malformed_response() -> None:
     request = ConnectorRegistrationRequest(
         registration_token="one-time-registration-token",
         connector_name="Connector",
-        connector_version="0.2.0",
+        connector_version="1.2.3",
         environment="production",
         instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
         capabilities=["filesystem_documents"],
@@ -296,7 +297,7 @@ async def test_registration_maps_structured_remote_errors(code: str, message: st
     request = ConnectorRegistrationRequest(
         registration_token="secret-value-not-in-error",
         connector_name="Connector",
-        connector_version="0.2.0",
+        connector_version="1.2.3",
         environment="production",
         instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
         capabilities=["filesystem_documents"],
@@ -327,7 +328,7 @@ async def test_unknown_registration_code_uses_safe_saas_message() -> None:
             ConnectorRegistrationRequest(
                 registration_token="one-time-registration-token",
                 connector_name="Connector",
-                connector_version="0.2.0",
+                connector_version="1.2.3",
                 environment="production",
                 instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
                 capabilities=["filesystem_documents"],
@@ -356,7 +357,7 @@ async def test_structured_error_never_relays_token_bearing_message() -> None:
             ConnectorRegistrationRequest(
                 registration_token=submitted_token,
                 connector_name="Connector",
-                connector_version="0.2.0",
+                connector_version="1.2.3",
                 environment="production",
                 instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
                 capabilities=["filesystem_documents"],
@@ -391,7 +392,7 @@ async def test_malformed_registration_error_uses_generic_fallback(
             ConnectorRegistrationRequest(
                 registration_token="one-time-registration-token",
                 connector_name="Connector",
-                connector_version="0.2.0",
+                connector_version="1.2.3",
                 environment="production",
                 instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
                 capabilities=["filesystem_documents"],
@@ -430,7 +431,7 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
             instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
             name="VITWO Production Connector",
             environment="production",
-            connector_version="0.2.0",
+            connector_version="1.2.3",
             timestamp=datetime(2026, 7, 20, 12, tzinfo=UTC),
             status="healthy",
             uptime_seconds=12345,
@@ -447,7 +448,7 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
         "instance_id": "41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
         "name": "VITWO Production Connector",
         "environment": "production",
-        "connector_version": "0.2.0",
+        "connector_version": "1.2.3",
         "timestamp": "2026-07-20T12:00:00Z",
         "status": "healthy",
         "uptime_seconds": 12345,
@@ -501,7 +502,7 @@ async def test_document_delivery_contract_is_authenticated_idempotent_and_acknow
             content_hash=f"sha256:{digest}",
             modified_at=datetime(2026, 7, 21, 10, 30, tzinfo=UTC),
             operation="upsert",
-            connector_version="0.2.0",
+            connector_version="1.2.3",
         ),
         "stable-idempotency-key",
         path,
@@ -515,3 +516,79 @@ async def test_document_delivery_contract_is_authenticated_idempotent_and_acknow
         "has_file": True,
     }
     assert response.accepted and response.content_hash == f"sha256:{digest}"
+
+
+@pytest.mark.asyncio
+async def test_operational_tool_poll_and_result_use_connector_authentication() -> None:
+    captured: list[tuple[str, str, str]] = []
+    request_id = "8b7ed8f3-1397-4ec8-b601-1b75d8bc18c7"
+    connector_id = UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(
+            (
+                request.method,
+                request.url.path,
+                request.headers["Authorization"],
+            )
+        )
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": request_id,
+                    "tool_name": "count_assets",
+                    "arguments": {"os_family": "linux"},
+                    "expires_at": "2026-07-29T12:00:30Z",
+                    "claim_token": "ephemeral-claim-token-that-is-long",
+                },
+            )
+        body = json.loads(request.content)
+        assert body["result"]["count"] == 14
+        assert "promql" not in body
+        return httpx.Response(204)
+
+    client = client_for(httpx.MockTransport(handler))
+    claimed = await client.claim_operational_tool(
+        "https://peka.example.test", connector_id, "connector-secret"
+    )
+    assert claimed is not None and claimed.tool_name == "count_assets"
+    await client.submit_operational_tool_result(
+        "https://peka.example.test",
+        connector_id,
+        "connector-secret",
+        claimed.id,
+        OperationalToolResult(
+            claim_token=claimed.claim_token,
+            status="completed",
+            result={"count": 14},
+        ),
+    )
+    assert captured == [
+        (
+            "GET",
+            f"/api/v1/connectors/{connector_id}/operational-tools/requests/next",
+            "Bearer connector-secret",
+        ),
+        (
+            "POST",
+            (
+                f"/api/v1/connectors/{connector_id}/operational-tools/requests/"
+                f"{request_id}/result"
+            ),
+            "Bearer connector-secret",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_operational_tool_poll_returns_none_for_no_content() -> None:
+    client = client_for(
+        httpx.MockTransport(lambda _request: httpx.Response(204))
+    )
+    result = await client.claim_operational_tool(
+        "https://peka.example.test",
+        UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+        "connector-secret",
+    )
+    assert result is None

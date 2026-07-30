@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 import zipfile
 from collections.abc import Iterator
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.core.rate_limit import auth_rate_limiter
+from app.core.version import CONNECTOR_VERSION
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.session import engine
 from app.main import app
@@ -47,6 +49,32 @@ def _login(
     response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_runtime_version_is_consistent_across_apis(client: TestClient) -> None:
+    health = client.get("/api/v1/health")
+    assert health.status_code == 200
+    assert health.json() == {"status": "healthy", "version": CONNECTOR_VERSION}
+
+    _bootstrap(client)
+    headers = _login(client)
+    overview = client.get("/api/v1/overview", headers=headers)
+    diagnostics = client.get("/api/v1/diagnostics", headers=headers)
+    assert overview.status_code == 200
+    assert diagnostics.status_code == 200
+    assert overview.json()["connector_version"] == CONNECTOR_VERSION
+    assert diagnostics.json()["version"] == CONNECTOR_VERSION
+
+
+def test_startup_log_includes_runtime_version(caplog: pytest.LogCaptureFixture) -> None:
+    asyncio.run(_reset_database())
+    auth_rate_limiter.reset()
+    with caplog.at_level(logging.INFO, logger="app.main"), TestClient(app):
+        pass
+    assert (
+        f"PEKA Connector starting version={CONNECTOR_VERSION} "
+        f"environment={get_settings().environment}"
+    ) in caplog.messages
 
 
 def test_first_run_login_refresh_logout_and_password_change(client: TestClient) -> None:

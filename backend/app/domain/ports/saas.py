@@ -1,11 +1,11 @@
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-ConnectorCapabilityName = Literal["filesystem_documents"]
+ConnectorCapabilityName = Literal["filesystem_documents", "operational_tools"]
 
 
 class ConnectorRegistrationRequest(BaseModel):
@@ -115,6 +115,29 @@ class DocumentDeliveryResponse(BaseModel):
     ingestion_status: str = Field(min_length=1, max_length=100)
 
 
+class OperationalToolRequest(BaseModel):
+    id: UUID
+    tool_name: Literal[
+        "get_inventory_summary",
+        "count_assets",
+        "search_assets",
+        "get_asset_details",
+        "get_asset_status",
+        "get_asset_utilization",
+    ]
+    arguments: dict[str, Any]
+    expires_at: datetime
+    claim_token: str = Field(min_length=20, max_length=512)
+
+
+class OperationalToolResult(BaseModel):
+    claim_token: str = Field(min_length=20, max_length=512)
+    status: Literal["completed", "failed"]
+    result: dict[str, Any] | None = None
+    error_code: str | None = Field(default=None, max_length=100)
+    error_message: str | None = Field(default=None, max_length=500)
+
+
 class SaaSClientError(Exception):
     def __init__(
         self,
@@ -173,6 +196,22 @@ class PEKASaaSClient(Protocol):
         idempotency_key: str,
         file_path: Path | None,
     ) -> DocumentDeliveryResponse: ...
+
+    async def claim_operational_tool(
+        self,
+        base_url: str,
+        connector_id: UUID,
+        connector_secret: str,
+    ) -> OperationalToolRequest | None: ...
+
+    async def submit_operational_tool_result(
+        self,
+        base_url: str,
+        connector_id: UUID,
+        connector_secret: str,
+        request_id: UUID,
+        result: OperationalToolResult,
+    ) -> None: ...
 
     async def report_source_health(self) -> None: ...
 
