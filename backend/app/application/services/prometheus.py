@@ -430,30 +430,103 @@ class PrometheusService:
                 "cpu_percent": None,
                 "memory_percent": None,
                 "disk_percent": None,
+                "load_average_1m": None,
+                "cpu_count": None,
+                "filesystems": [],
+                "top_cpu_processes": [],
+                "top_memory_processes": [],
                 "metric_timestamp": None,
+                "error_code": "PROMETHEUS_NOT_CONFIGURED",
                 "unavailable_reason": "Prometheus is not configured.",
             }
-        identities = [
-            value
-            for value in (asset.hostname, asset.fqdn, asset.canonical_name, asset.primary_ip)
-            if value
-        ]
-        if not identities:
+        observations = list(
+            (
+                await self.session.scalars(
+                    select(InventoryObservationModel).where(
+                        InventoryObservationModel.asset_id == asset.id,
+                        InventoryObservationModel.source_type == "prometheus",
+                    )
+                )
+            ).all()
+        )
+        if not observations:
             return {
                 "asset_id": str(asset.id),
                 "asset": asset.canonical_name,
                 "cpu_percent": None,
                 "memory_percent": None,
                 "disk_percent": None,
+                "load_average_1m": None,
+                "cpu_count": None,
+                "filesystems": [],
+                "top_cpu_processes": [],
+                "top_memory_processes": [],
                 "metric_timestamp": None,
-                "unavailable_reason": "The asset has no Prometheus-compatible identity.",
+                "error_code": "PROMETHEUS_TARGET_NOT_FOUND",
+                "unavailable_reason": (
+                    "Prometheus target not found for this inventory asset. "
+                    "The hostname could not be mapped to a scraped target."
+                ),
             }
+        target_fields = [
+            item.observed_fields_json
+            for item in observations
+            if isinstance(item.observed_fields_json, dict)
+        ]
+        actual_instances = [
+            str(fields["instance"]).strip()
+            for fields in target_fields
+            if fields.get("instance")
+        ]
+        if not actual_instances:
+            return {
+                "asset_id": str(asset.id),
+                "asset": asset.canonical_name,
+                "cpu_percent": None,
+                "memory_percent": None,
+                "disk_percent": None,
+                "load_average_1m": None,
+                "cpu_count": None,
+                "filesystems": [],
+                "top_cpu_processes": [],
+                "top_memory_processes": [],
+                "metric_timestamp": None,
+                "error_code": "HOSTNAME_MAPPING_FAILED",
+                "unavailable_reason": (
+                    "The correlated Prometheus target has no usable instance label."
+                ),
+            }
+        last_scrapes = [
+            str(fields["last_scrape"])
+            for fields in target_fields
+            if fields.get("last_scrape")
+            and not str(fields["last_scrape"]).startswith("0001-")
+        ]
+        if not last_scrapes:
+            return {
+                "asset_id": str(asset.id),
+                "asset": asset.canonical_name,
+                "cpu_percent": None,
+                "memory_percent": None,
+                "disk_percent": None,
+                "load_average_1m": None,
+                "cpu_count": None,
+                "filesystems": [],
+                "top_cpu_processes": [],
+                "top_memory_processes": [],
+                "metric_timestamp": None,
+                "error_code": "HOST_NEVER_SCRAPED",
+                "unavailable_reason": "The mapped Prometheus target has never been scraped.",
+            }
+        # Prometheus uses Go/RE2 expressions. Non-capturing groups such as
+        # (?:...) are rejected, so query the exact instance labels retained by
+        # inventory correlation with a plain anchored alternation.
         instance_pattern = (
-            "^(?:"
-            + "|".join(re.escape(value) for value in identities)
-            + ")(?::\\d+)?$"
+            "^("
+            + "|".join(re.escape(value) for value in dict.fromkeys(actual_instances))
+            + ")$"
         )
-        selector = f'instance=~"{instance_pattern}"'
+        selector = f"instance=~{json.dumps(instance_pattern)}"
         expressions = {
             "cpu_percent": (
                 "100 - (avg by (instance) "
@@ -465,9 +538,14 @@ class PrometheusService:
             ),
             "disk_percent": (
                 "max by (instance) ((1 - "
-                f"(node_filesystem_avail_bytes{{{selector},fstype!~=\"tmpfs|overlay|squashfs\"}} / "
+                f"(node_filesystem_avail_bytes{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}} / "
                 f"node_filesystem_size_bytes{{{selector},"
-                "fstype!~=\"tmpfs|overlay|squashfs\"})) * 100)"
+                "fstype!~\"tmpfs|overlay|squashfs\"})) * 100)"
+            ),
+            "load_average_1m": f"node_load1{{{selector}}}",
+            "cpu_count": (
+                "count by (instance) (count by (instance, cpu) "
+                f"(node_cpu_seconds_total{{mode=\"idle\",{selector}}}))"
             ),
         }
         result: dict[str, Any] = {
@@ -476,7 +554,13 @@ class PrometheusService:
             "cpu_percent": None,
             "memory_percent": None,
             "disk_percent": None,
+            "load_average_1m": None,
+            "cpu_count": None,
+            "filesystems": [],
+            "top_cpu_processes": [],
+            "top_memory_processes": [],
             "metric_timestamp": None,
+            "error_code": None,
             "unavailable_reason": None,
         }
         timestamps: list[datetime] = []
@@ -498,10 +582,100 @@ class PrometheusService:
                 continue
             result[field] = numeric
             timestamps.append(timestamp)
+        filesystem_query = (
+            "(1 - (node_filesystem_avail_bytes"
+            f"{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}} / "
+            "node_filesystem_size_bytes"
+            f"{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}})) * 100"
+        )
+        filesystem_payload = await self._request(
+            configuration,
+            "/api/v1/query?" + urlencode({"query": filesystem_query}),
+        )
+        filesystems: list[dict[str, Any]] = []
+        for series_item in filesystem_payload.get("data", {}).get("result") or []:
+            if not isinstance(series_item, dict):
+                continue
+            value = series_item.get("value")
+            metric = series_item.get("metric")
+            if not isinstance(value, list) or len(value) != 2 or not isinstance(metric, dict):
+                continue
+            try:
+                timestamp = datetime.fromtimestamp(float(value[0]), UTC)
+                used_percent = round(float(value[1]), 2)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            filesystems.append(
+                {
+                    "mountpoint": metric.get("mountpoint") or "unknown",
+                    "device": metric.get("device"),
+                    "fstype": metric.get("fstype"),
+                    "used_percent": used_percent,
+                }
+            )
+            timestamps.append(timestamp)
+        result["filesystems"] = sorted(
+            filesystems,
+            key=lambda item: (-float(item["used_percent"]), str(item["mountpoint"])),
+        )
+        if filesystems:
+            result["disk_percent"] = max(
+                float(item["used_percent"]) for item in filesystems
+            )
+
+        process_expressions = {
+            "top_cpu_processes": (
+                "topk(5, sum by (groupname) "
+                f"(rate(namedprocess_namegroup_cpu_seconds_total{{{selector}}}[5m])) * 100)"
+            ),
+            "top_memory_processes": (
+                "topk(5, sum by (groupname) "
+                f"(namedprocess_namegroup_memory_bytes{{memtype=\"resident\",{selector}}}))"
+            ),
+        }
+        for field, expression in process_expressions.items():
+            payload = await self._request(
+                configuration,
+                "/api/v1/query?" + urlencode({"query": expression}),
+            )
+            processes: list[dict[str, Any]] = []
+            for series_item in payload.get("data", {}).get("result") or []:
+                if not isinstance(series_item, dict):
+                    continue
+                value = series_item.get("value")
+                metric = series_item.get("metric")
+                if not isinstance(value, list) or len(value) != 2 or not isinstance(metric, dict):
+                    continue
+                try:
+                    timestamp = datetime.fromtimestamp(float(value[0]), UTC)
+                    numeric = float(value[1])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                key = (
+                    "cpu_percent"
+                    if field == "top_cpu_processes"
+                    else "memory_bytes"
+                )
+                processes.append(
+                    {
+                        "name": metric.get("groupname") or "unknown",
+                        key: round(numeric, 2) if key == "cpu_percent" else int(numeric),
+                    }
+                )
+                timestamps.append(timestamp)
+            result[field] = processes
         result["metric_timestamp"] = max(timestamps) if timestamps else None
-        if not timestamps:
+        node_values = [
+            result["cpu_percent"],
+            result["memory_percent"],
+            result["load_average_1m"],
+            result["cpu_count"],
+            *[item["used_percent"] for item in result["filesystems"]],
+        ]
+        if not any(value is not None for value in node_values):
+            result["error_code"] = "NODE_EXPORTER_METRICS_NOT_FOUND"
             result["unavailable_reason"] = (
-                "Prometheus returned no matching node-exporter utilization metrics."
+                "The Prometheus target exists, but no node_exporter metrics were found."
             )
         return result
 
@@ -535,11 +709,24 @@ class PrometheusService:
         except httpx.TimeoutException as exc:
             raise PrometheusError("TIMEOUT", "Prometheus request timed out.", 504) from exc
         except httpx.HTTPStatusError as exc:
-            code = (
-                "AUTHENTICATION_FAILED" if exc.response.status_code in {401, 403} else "HTTP_ERROR"
-            )
+            if exc.response.status_code in {401, 403}:
+                code = "AUTHENTICATION_FAILED"
+                message = "Prometheus rejected the configured credentials."
+            elif exc.response.status_code == 400:
+                code = "PROMETHEUS_QUERY_REJECTED"
+                try:
+                    detail = exc.response.json().get("error")
+                except ValueError:
+                    detail = None
+                message = (
+                    "Prometheus rejected the fixed metrics query"
+                    + (f": {sanitize(str(detail))}" if detail else ".")
+                )
+            else:
+                code = "HTTP_ERROR"
+                message = f"Prometheus returned HTTP {exc.response.status_code}."
             raise PrometheusError(
-                code, f"Prometheus returned HTTP {exc.response.status_code}.", 502
+                code, str(message)[:500], 502
             ) from exc
         except httpx.HTTPError as exc:
             raise self._network_error(exc) from exc

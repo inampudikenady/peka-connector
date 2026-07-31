@@ -2,7 +2,7 @@ import type {
   CurrentUser, Diagnostics, Health, LocalUser, LoginResponse, Overview, PaginatedActivity,
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
   CMDBDataset, CMDBImportMode, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
-  PrometheusDiagnostics, TrustedCertificateAuthority,
+  LokiConfiguration, PrometheusDiagnostics, TrustedCertificateAuthority,
 } from './types';
 
 let accessToken: string | null = null;
@@ -179,6 +179,11 @@ export const api = {
   testPrometheus: (id: string): Promise<{ message: string }> => request(`/prometheus/configurations/${id}/test`, { method: 'POST' }),
   diagnosePrometheus: (id: string): Promise<PrometheusDiagnostics> => request(`/prometheus/configurations/${id}/diagnostics`, { method: 'POST' }),
   scanPrometheus: (id: string): Promise<{ target_count: number }> => request(`/prometheus/configurations/${id}/scan`, { method: 'POST' }),
+  lokiConfigurations: (): Promise<LokiConfiguration[]> => request('/loki/configurations'),
+  createLokiConfiguration: (body: object): Promise<LokiConfiguration> => request('/loki/configurations', { method: 'POST', body: JSON.stringify(body) }),
+  updateLokiConfiguration: (id: string, body: object): Promise<LokiConfiguration> => request(`/loki/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  testLoki: (id: string): Promise<{ message: string; stream_count: number; labels: string[]; sample_query_validated: boolean }> => request(`/loki/configurations/${id}/test`, { method: 'POST' }),
+  discoverLoki: (id: string): Promise<{ stream_count: number; labels: string[] }> => request(`/loki/configurations/${id}/discover`, { method: 'POST' }),
   inventory: (query: string): Promise<PaginatedInventory> => request(`/inventory?${query}`),
   inventoryDetail: (id: string): Promise<InventoryDetail> => request(`/inventory/${id}`),
   decideCorrelation: (observationId: string, assetId: string | null, status: string): Promise<void> =>

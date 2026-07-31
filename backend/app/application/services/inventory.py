@@ -905,12 +905,21 @@ class InventoryService:
         os_family: str | None = None,
         environment: str | None = None,
         missing_prometheus: bool | None = None,
+        prometheus_health: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         filters: list[Any] = [InventoryAssetModel.retired_at.is_(None)]
         if identifier:
             clean = identifier.strip().rstrip(".").casefold()
             short = clean.split(".", 1)[0]
+            identity_type, normalized = endpoint_identity(identifier)
+            normalized_values = {clean, short}
+            if identity_type and normalized:
+                normalized_values.add(normalized.casefold().rstrip("."))
+                if identity_type == "fqdn":
+                    _, normalized_short = normalize_hostname(normalized)
+                    if normalized_short:
+                        normalized_values.add(normalized_short)
             filters.append(
                 or_(
                     func.lower(InventoryAssetModel.hostname) == short,
@@ -918,6 +927,13 @@ class InventoryService:
                     func.lower(InventoryAssetModel.canonical_name) == clean,
                     func.lower(InventoryAssetModel.canonical_name) == short,
                     InventoryAssetModel.primary_ip == identifier.strip(),
+                    InventoryAssetModel.id.in_(
+                        select(InventoryIdentityModel.asset_id).where(
+                            InventoryIdentityModel.normalized_value.in_(
+                                sorted(normalized_values)
+                            )
+                        )
+                    ),
                 )
             )
         if os_family:
@@ -959,6 +975,31 @@ class InventoryService:
                 if prometheus
                 else "unavailable"
             )
+            if prometheus_health and health != prometheus_health.casefold():
+                continue
+            last_scrapes = [
+                item.observed_fields_json.get("last_scrape")
+                for item in prometheus
+                if item.observed_fields_json.get("last_scrape")
+                and not str(item.observed_fields_json.get("last_scrape")).startswith("0001-")
+            ]
+            last_scrape = max((str(value) for value in last_scrapes), default=None)
+            metrics_available = bool(prometheus and last_scrape)
+            node_targets = [
+                item
+                for item in prometheus
+                if "node"
+                in str(item.observed_fields_json.get("job") or "").casefold()
+            ]
+            reachability_targets = node_targets or prometheus
+            reachable = (
+                any(
+                    item.observed_fields_json.get("health") == "up"
+                    for item in reachability_targets
+                )
+                if reachability_targets
+                else None
+            )
             results.append(
                 {
                     "id": str(asset.id),
@@ -971,6 +1012,16 @@ class InventoryService:
                     "asset_type": asset.asset_type,
                     "lifecycle_status": asset.lifecycle_status,
                     "prometheus_health": health,
+                    "prometheus_scrape_status": (
+                        "up"
+                        if health == "healthy"
+                        else "down"
+                        if health == "unhealthy"
+                        else "not_found"
+                    ),
+                    "last_scrape_at": last_scrape,
+                    "metrics_available": metrics_available,
+                    "reachable": reachable,
                     "last_observed_at": max(
                         (item.last_seen_at for item in observations), default=None
                     ),
@@ -992,13 +1043,7 @@ class InventoryService:
         return {
             **item,
             "inventory_status": asset.lifecycle_status or "unknown",
-            "reachable": (
-                True
-                if item["prometheus_health"] == "healthy"
-                else False
-                if item["prometheus_health"] == "unhealthy"
-                else None
-            ),
+            "reachable": item["reachable"],
         }
 
     async def asset_detail(self, asset_id: UUID) -> dict[str, Any] | None:

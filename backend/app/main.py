@@ -22,6 +22,7 @@ from app.application.services.auth import (
 from app.application.services.certificates import CertificateError
 from app.application.services.cmdb import CMDBError
 from app.application.services.documents import DocumentError, ManagedDocumentService
+from app.application.services.loki import LokiError
 from app.application.services.prometheus import PrometheusError
 from app.application.services.saas import (
     ConfirmationRequiredError,
@@ -267,6 +268,14 @@ async def certificate_error(_: Request, exc: CertificateError) -> JSONResponse:
 
 @app.exception_handler(PrometheusError)
 async def prometheus_error(_: Request, exc: PrometheusError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(LokiError)
+async def loki_error(_: Request, exc: LokiError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": str(exc), "detail": str(exc)},

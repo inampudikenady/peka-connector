@@ -15,6 +15,7 @@ const OverviewPage = lazy(() => import('./pages/OverviewPage').then((module) => 
 const DocumentsPage = lazy(() => import('./pages/DocumentsPage').then((module) => ({ default: module.DocumentsPage })));
 const CMDBPage = lazy(() => import('./pages/CMDBPage').then((module) => ({ default: module.CMDBPage })));
 const PrometheusPage = lazy(() => import('./pages/PrometheusPage').then((module) => ({ default: module.PrometheusPage })));
+const LokiPage = lazy(() => import('./pages/LokiPage').then((module) => ({ default: module.LokiPage })));
 const InventoryPage = lazy(() => import('./pages/InventoryPage').then((module) => ({ default: module.InventoryPage })));
 const LogsPage = lazy(() => import('./pages/LogsPage').then((module) => ({ default: module.LogsPage })));
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage').then((module) => ({ default: module.DiagnosticsPage })));
@@ -35,6 +36,7 @@ function Application() {
     <Route path="/documents" element={<DocumentsPage />} />
     <Route path="/cmdb" element={<CMDBPage />} />
     <Route path="/prometheus" element={<PrometheusPage />} />
+    <Route path="/loki" element={<LokiPage />} />
     <Route path="/inventory" element={<InventoryPage />} />
     <Route path="/activity" element={<ActivityPage />} />
     <Route path="/logs" element={<LogsPage />} />

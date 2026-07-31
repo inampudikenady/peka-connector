@@ -42,6 +42,15 @@ export interface PrometheusDiagnostics {
   success: boolean; stages: PrometheusDiagnosticStage[]; warnings: string[];
   correlation_id: string;
 }
+export interface LokiConfiguration {
+  id: string; name: string; base_url: string; auth_type: string; username: string | null;
+  has_secret: boolean; tls_verify: boolean; request_timeout_seconds: number;
+  enabled: boolean; discovery_lookback_days: number;
+  last_successful_test_at: string | null; last_successful_discovery_at: string | null;
+  last_failed_discovery_at: string | null; last_error: string | null;
+  stream_count: number; labels: string[]; label_values: Record<string, string[]>;
+  warnings: string[];
+}
 export interface TrustedCertificateAuthority {
   id: string; name: string; original_filename: string; fingerprint_sha256: string;
   subject: string; issuer: string; not_valid_before: string; not_valid_after: string;

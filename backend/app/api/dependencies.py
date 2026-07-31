@@ -11,6 +11,7 @@ from app.application.services.certificates import TrustedCertificateService
 from app.application.services.cmdb import CMDBService
 from app.application.services.documents import ManagedDocumentService
 from app.application.services.inventory import InventoryService
+from app.application.services.loki import LokiService
 from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import RegistrationService
 from app.application.services.sources import SourceService
@@ -82,6 +83,10 @@ def get_prometheus_service(session: SessionDep, settings: SettingsDep) -> Promet
     return PrometheusService(session, SecretEncryptionService(settings.encryption_key), settings)
 
 
+def get_loki_service(session: SessionDep, settings: SettingsDep) -> LokiService:
+    return LokiService(session, SecretEncryptionService(settings.encryption_key), settings)
+
+
 def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
     return RegistrationService(
         SqlAlchemyOperationsRepository(session),
@@ -143,4 +148,5 @@ CMDBServiceDep = Annotated[CMDBService, Depends(get_cmdb_service)]
 CertificateServiceDep = Annotated[TrustedCertificateService, Depends(get_certificate_service)]
 InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
 PrometheusServiceDep = Annotated[PrometheusService, Depends(get_prometheus_service)]
+LokiServiceDep = Annotated[LokiService, Depends(get_loki_service)]
 RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

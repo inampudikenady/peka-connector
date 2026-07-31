@@ -12,6 +12,7 @@ from app.infrastructure.database.models.inventory import (
     InventoryIdentityModel,
     InventoryObservationModel,
     InventoryServiceModel,
+    LokiConfigurationModel,
     PrometheusConfigurationModel,
 )
 from app.infrastructure.database.models.operations import (
@@ -40,6 +41,7 @@ __all__ = [
     "InventoryIdentityModel",
     "InventoryObservationModel",
     "InventoryServiceModel",
+    "LokiConfigurationModel",
     "PrometheusConfigurationModel",
     "ProductSettingsModel",
     "RefreshTokenModel",

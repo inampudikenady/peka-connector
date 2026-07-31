@@ -277,3 +277,34 @@ class PrometheusConfigurationModel(Base):
     unhealthy_target_count: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
+
+
+class LokiConfigurationModel(Base):
+    __tablename__ = "loki_configurations"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    base_url: Mapped[str] = mapped_column(String(1000))
+    auth_type: Mapped[str] = mapped_column(String(32), default="none")
+    username: Mapped[str | None] = mapped_column(String(500), default=None)
+    encrypted_secret: Mapped[str | None] = mapped_column(Text, default=None)
+    tls_verify: Mapped[bool] = mapped_column(Boolean, default=True)
+    request_timeout_seconds: Mapped[float] = mapped_column(Float, default=10.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    discovery_lookback_days: Mapped[int] = mapped_column(default=30)
+    discovered_schema_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_successful_test_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), default=None
+    )
+    last_successful_discovery_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), default=None
+    )
+    last_failed_discovery_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), default=None
+    )
+    last_error: Mapped[str | None] = mapped_column(String(2000), default=None)
+    stream_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utcnow, onupdate=utcnow
+    )

@@ -124,6 +124,7 @@ class OperationalToolRequest(BaseModel):
         "get_asset_details",
         "get_asset_status",
         "get_asset_utilization",
+        "get_asset_log_evidence",
     ]
     arguments: dict[str, Any]
     expires_at: datetime
