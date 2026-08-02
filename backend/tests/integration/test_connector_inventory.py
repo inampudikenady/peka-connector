@@ -470,9 +470,7 @@ def test_prometheus_instance_name_fqdn_matches_unambiguous_short_hostname(
 
     assert scan.status_code == 200, scan.text
     assert scan.json()["unmatched_target_count"] == 0
-    inventory = client.get(
-        "/api/v1/inventory?page=1&page_size=25", headers=headers
-    ).json()
+    inventory = client.get("/api/v1/inventory?page=1&page_size=25", headers=headers).json()
     assert inventory["total"] == 3
     by_name = {item["canonical_name"]: item for item in inventory["items"]}
     assert by_name["util001"]["prometheus_health"] == "healthy"

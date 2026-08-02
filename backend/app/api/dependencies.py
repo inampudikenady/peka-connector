@@ -16,6 +16,7 @@ from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import RegistrationService
 from app.application.services.sources import SourceService
 from app.application.services.users import UserService
+from app.application.services.zammad import ZammadService
 from app.core.config import Settings, get_settings
 from app.domain.entities.source import UserAccount
 from app.infrastructure.auth.tokens import decode_access_token
@@ -87,6 +88,10 @@ def get_loki_service(session: SessionDep, settings: SettingsDep) -> LokiService:
     return LokiService(session, SecretEncryptionService(settings.encryption_key), settings)
 
 
+def get_zammad_service(session: SessionDep, settings: SettingsDep) -> ZammadService:
+    return ZammadService(session, SecretEncryptionService(settings.encryption_key))
+
+
 def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
     return RegistrationService(
         SqlAlchemyOperationsRepository(session),
@@ -149,4 +154,5 @@ CertificateServiceDep = Annotated[TrustedCertificateService, Depends(get_certifi
 InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
 PrometheusServiceDep = Annotated[PrometheusService, Depends(get_prometheus_service)]
 LokiServiceDep = Annotated[LokiService, Depends(get_loki_service)]
+ZammadServiceDep = Annotated[ZammadService, Depends(get_zammad_service)]
 RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

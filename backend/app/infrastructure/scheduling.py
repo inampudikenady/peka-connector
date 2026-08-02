@@ -13,10 +13,12 @@ from app.application.services.operational_tools import OperationalToolWorker
 from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import HeartbeatService, RegistrationStateError
 from app.application.services.sources import ScanInProgressError, SourceService
+from app.application.services.zammad import ZammadService
 from app.core.config import get_settings
 from app.domain.ports.saas import SaaSClientError
 from app.infrastructure.database.models.inventory import PrometheusConfigurationModel
 from app.infrastructure.database.models.source import SourceModel
+from app.infrastructure.database.models.zammad import ZammadConfigurationModel
 from app.infrastructure.database.repositories.documents import SqlAlchemyDocumentRepository
 from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
 from app.infrastructure.database.repositories.scans import SqlAlchemyScanRepository
@@ -106,10 +108,13 @@ class ConnectorScheduler:
             prometheus_ids = list(
                 (await session.scalars(select(PrometheusConfigurationModel.id))).all()
             )
+            zammad_ids = list((await session.scalars(select(ZammadConfigurationModel.id))).all())
         for source in sources:
             await self.reconcile_source(source.id)
         for configuration_id in prometheus_ids:
             await self.reconcile_prometheus(configuration_id)
+        for configuration_id in zammad_ids:
+            await self.reconcile_zammad(configuration_id)
         settings = get_settings()
         async with session_factory() as session:
             worker = DocumentDeliveryWorker(
@@ -222,6 +227,84 @@ class ConnectorScheduler:
         job = self._scheduler.get_job(f"prometheus:{configuration_id}")
         if job:
             self._scheduler.remove_job(job.id)
+
+    async def reconcile_zammad(self, configuration_id: UUID) -> None:
+        job_id = f"zammad:{configuration_id}"
+        async with session_factory() as session:
+            configuration = await session.get(ZammadConfigurationModel, configuration_id)
+            if configuration is None or not configuration.enabled:
+                if self._scheduler.get_job(job_id):
+                    self._scheduler.remove_job(job_id)
+                if configuration:
+                    configuration.next_scheduled_sync_at = None
+                    await session.commit()
+                return
+            seconds = configuration.sync_interval_seconds
+            job = self._scheduler.add_job(
+                self._run_zammad_sync,
+                IntervalTrigger(seconds=seconds, timezone=UTC),
+                args=[configuration_id],
+                id=job_id,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=max(30, min(seconds, 300)),
+            )
+            configuration.next_scheduled_sync_at = job.next_run_time
+            await session.commit()
+        logger.info(
+            "Zammad synchronization job registered",
+            extra={"configuration_id": str(configuration_id), "interval_seconds": seconds},
+        )
+
+    async def remove_zammad(self, configuration_id: UUID) -> None:
+        job = self._scheduler.get_job(f"zammad:{configuration_id}")
+        if job:
+            self._scheduler.remove_job(job.id)
+
+    async def _run_zammad_sync(self, configuration_id: UUID) -> None:
+        correlation_id = uuid4()
+        async with session_factory() as session:
+            operations = SqlAlchemyOperationsRepository(session)
+            service = ZammadService(
+                session,
+                SecretEncryptionService(get_settings().encryption_key),
+            )
+            try:
+                result = await service.synchronize(configuration_id)
+                await operations.record_event(
+                    "zammad.sync_completed",
+                    f"Scheduled Zammad synchronization completed: {result['ticket_count']} tickets",
+                    target_type="zammad_configuration",
+                    target_id=str(configuration_id),
+                    details={
+                        "trigger": "scheduled",
+                        "correlation_id": str(correlation_id),
+                        "ticket_count": result["ticket_count"],
+                        "article_count": result["article_count"],
+                    },
+                    component="zammad",
+                )
+            except Exception as exc:
+                await operations.record_event(
+                    "zammad.sync_failed",
+                    "Scheduled Zammad synchronization failed",
+                    target_type="zammad_configuration",
+                    target_id=str(configuration_id),
+                    details={
+                        "trigger": "scheduled",
+                        "correlation_id": str(correlation_id),
+                        "error": str(exc)[:500],
+                    },
+                    level="ERROR",
+                    component="zammad",
+                )
+            finally:
+                configuration = await session.get(ZammadConfigurationModel, configuration_id)
+                job = self._scheduler.get_job(f"zammad:{configuration_id}")
+                if configuration:
+                    configuration.next_scheduled_sync_at = job.next_run_time if job else None
+                    await session.commit()
 
     async def _run_prometheus_scan(self, configuration_id: UUID) -> None:
         correlation_id = uuid4()

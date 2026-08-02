@@ -315,11 +315,7 @@ class InventoryService:
             values = (
                 {normalized for _, _, normalized in identities}
                 if identity_type == "alias"
-                else {
-                    normalized
-                    for kind, _, normalized in identities
-                    if kind == identity_type
-                }
+                else {normalized for kind, _, normalized in identities if kind == identity_type}
             )
             for normalized in values:
                 rows = await self.session.execute(
@@ -370,8 +366,7 @@ class InventoryService:
         nonempty = [
             values
             for priority, kind in enumerate(IDENTITY_PRIORITY)
-            if priority <= conflict_ceiling
-            and (values := all_exact.get(kind, set()))
+            if priority <= conflict_ceiling and (values := all_exact.get(kind, set()))
         ]
         conflicting = len({asset_id for values in nonempty for asset_id in values}) > 1
         if len(candidates) == 1 and not conflicting:
@@ -871,9 +866,7 @@ class InventoryService:
         if os_family:
             filters.append(self._os_condition(os_family))
         count = int(
-            await self.session.scalar(
-                select(func.count(InventoryAssetModel.id)).where(*filters)
-            )
+            await self.session.scalar(select(func.count(InventoryAssetModel.id)).where(*filters))
             or 0
         )
         return {
@@ -891,9 +884,7 @@ class InventoryService:
             "counts_by_os_family": {
                 "linux": linux["count"],
                 "windows": windows["count"],
-                "other_or_unknown": max(
-                    0, total["count"] - linux["count"] - windows["count"]
-                ),
+                "other_or_unknown": max(0, total["count"] - linux["count"] - windows["count"]),
             },
             "observed_at": total["observed_at"],
         }
@@ -929,9 +920,7 @@ class InventoryService:
                     InventoryAssetModel.primary_ip == identifier.strip(),
                     InventoryAssetModel.id.in_(
                         select(InventoryIdentityModel.asset_id).where(
-                            InventoryIdentityModel.normalized_value.in_(
-                                sorted(normalized_values)
-                            )
+                            InventoryIdentityModel.normalized_value.in_(sorted(normalized_values))
                         )
                     ),
                 )
@@ -961,9 +950,7 @@ class InventoryService:
                     )
                 ).all()
             )
-            prometheus = [
-                item for item in observations if item.source_type == "prometheus"
-            ]
+            prometheus = [item for item in observations if item.source_type == "prometheus"]
             if missing_prometheus is True and prometheus:
                 continue
             if missing_prometheus is False and not prometheus:
@@ -988,14 +975,12 @@ class InventoryService:
             node_targets = [
                 item
                 for item in prometheus
-                if "node"
-                in str(item.observed_fields_json.get("job") or "").casefold()
+                if "node" in str(item.observed_fields_json.get("job") or "").casefold()
             ]
             reachability_targets = node_targets or prometheus
             reachable = (
                 any(
-                    item.observed_fields_json.get("health") == "up"
-                    for item in reachability_targets
+                    item.observed_fields_json.get("health") == "up" for item in reachability_targets
                 )
                 if reachability_targets
                 else None

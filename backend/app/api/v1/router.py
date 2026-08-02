@@ -15,6 +15,7 @@ from app.api.v1.endpoints import (
     settings,
     sources,
     users,
+    zammad,
 )
 
 api_router = APIRouter()
@@ -26,6 +27,7 @@ api_router.include_router(documents.router, prefix="/documents", tags=["document
 api_router.include_router(cmdb.router, prefix="/cmdb", tags=["cmdb"])
 api_router.include_router(prometheus.router, prefix="/prometheus", tags=["prometheus"])
 api_router.include_router(loki.router, prefix="/loki", tags=["loki"])
+api_router.include_router(zammad.router, prefix="/zammad", tags=["zammad"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(operations.router, tags=["operations"])

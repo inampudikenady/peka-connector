@@ -572,10 +572,7 @@ async def test_operational_tool_poll_and_result_use_connector_authentication() -
         ),
         (
             "POST",
-            (
-                f"/api/v1/connectors/{connector_id}/operational-tools/requests/"
-                f"{request_id}/result"
-            ),
+            (f"/api/v1/connectors/{connector_id}/operational-tools/requests/{request_id}/result"),
             "Bearer connector-secret",
         ),
     ]
@@ -583,9 +580,7 @@ async def test_operational_tool_poll_and_result_use_connector_authentication() -
 
 @pytest.mark.asyncio
 async def test_operational_tool_poll_returns_none_for_no_content() -> None:
-    client = client_for(
-        httpx.MockTransport(lambda _request: httpx.Response(204))
-    )
+    client = client_for(httpx.MockTransport(lambda _request: httpx.Response(204)))
     result = await client.claim_operational_tool(
         "https://peka.example.test",
         UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),

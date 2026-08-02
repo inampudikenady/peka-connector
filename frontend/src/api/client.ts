@@ -2,7 +2,7 @@ import type {
   CurrentUser, Diagnostics, Health, LocalUser, LoginResponse, Overview, PaginatedActivity,
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
   CMDBDataset, CMDBImportMode, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
-  LokiConfiguration, PrometheusDiagnostics, TrustedCertificateAuthority,
+  LokiConfiguration, PrometheusDiagnostics, TrustedCertificateAuthority, ZammadConfiguration,
 } from './types';
 
 let accessToken: string | null = null;
@@ -184,6 +184,11 @@ export const api = {
   updateLokiConfiguration: (id: string, body: object): Promise<LokiConfiguration> => request(`/loki/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   testLoki: (id: string): Promise<{ message: string; stream_count: number; labels: string[]; sample_query_validated: boolean }> => request(`/loki/configurations/${id}/test`, { method: 'POST' }),
   discoverLoki: (id: string): Promise<{ stream_count: number; labels: string[] }> => request(`/loki/configurations/${id}/discover`, { method: 'POST' }),
+  zammadConfigurations: (): Promise<ZammadConfiguration[]> => request('/zammad/configurations'),
+  createZammadConfiguration: (body: object): Promise<ZammadConfiguration> => request('/zammad/configurations', { method: 'POST', body: JSON.stringify(body) }),
+  updateZammadConfiguration: (id: string, body: object): Promise<ZammadConfiguration> => request(`/zammad/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  testZammad: (id: string): Promise<{ message: string; readable_ticket_count: number }> => request(`/zammad/configurations/${id}/test`, { method: 'POST' }),
+  syncZammad: (id: string): Promise<{ ticket_count: number; article_count: number; duration_seconds: number }> => request(`/zammad/configurations/${id}/sync`, { method: 'POST' }),
   inventory: (query: string): Promise<PaginatedInventory> => request(`/inventory?${query}`),
   inventoryDetail: (id: string): Promise<InventoryDetail> => request(`/inventory/${id}`),
   decideCorrelation: (observationId: string, assetId: string | null, status: string): Promise<void> =>

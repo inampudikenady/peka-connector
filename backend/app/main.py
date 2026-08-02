@@ -39,6 +39,7 @@ from app.application.services.users import (
     UserNotFoundError,
     UserSafeguardError,
 )
+from app.application.services.zammad import ZammadError
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.version import CONNECTOR_VERSION
@@ -276,6 +277,14 @@ async def prometheus_error(_: Request, exc: PrometheusError) -> JSONResponse:
 
 @app.exception_handler(LokiError)
 async def loki_error(_: Request, exc: LokiError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(ZammadError)
+async def zammad_error(_: Request, exc: ZammadError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": str(exc), "detail": str(exc)},

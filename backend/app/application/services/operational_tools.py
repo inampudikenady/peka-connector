@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.inventory import InventoryService
 from app.application.services.loki import LokiError, LokiService
 from app.application.services.prometheus import PrometheusError, PrometheusService
+from app.application.services.zammad import ZammadError, ZammadService
 from app.core.config import Settings
 from app.domain.ports.saas import (
     OperationalToolRequest,
@@ -46,6 +48,7 @@ class AssetArguments(_Arguments):
 
 class StatusArguments(AssetArguments):
     mode: Literal["health", "performance", "timeline"] = "health"
+    detail_level: Literal["concise", "detailed"] = "concise"
 
 
 EvidenceCategory = Literal[
@@ -69,6 +72,89 @@ class LogEvidenceArguments(AssetArguments):
 
 class EmptyArguments(_Arguments):
     pass
+
+
+class TicketSearchArguments(_Arguments):
+    query: str | None = Field(default=None, max_length=1000)
+    state: Literal["open", "closed", "all"] = "all"
+    ticket_number: str | None = Field(default=None, max_length=100)
+    asset_identifier: str | None = Field(default=None, max_length=500)
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+    updated_from: datetime | None = None
+    updated_to: datetime | None = None
+    limit: int = Field(default=5, ge=1, le=50)
+    sort_order: Literal["updated_desc", "updated_asc"] = "updated_desc"
+
+
+class TicketArguments(_Arguments):
+    ticket_number: str | None = Field(default=None, max_length=100)
+    external_id: str | None = Field(default=None, max_length=100)
+    view: Literal["full", "status", "latest_update", "owner"] = "full"
+
+
+class TicketCountArguments(_Arguments):
+    updated_from: datetime | None = None
+    group_by_state: bool = True
+    requested_state: Literal["open", "closed", "all"] = "all"
+
+
+class AssetTicketArguments(AssetArguments):
+    recently_closed_days: int = Field(default=30, ge=1, le=365)
+
+
+class TicketCorrelationArguments(AssetArguments):
+    evidence_start: datetime | None = None
+    evidence_end: datetime | None = None
+    error_strings: list[str] = Field(default_factory=list, max_length=20)
+    warning_strings: list[str] = Field(default_factory=list, max_length=20)
+    service_names: list[str] = Field(default_factory=list, max_length=20)
+    symptoms: str | None = Field(default=None, max_length=1000)
+
+
+def _classify_log_impact(item: dict[str, Any], *, historical: bool) -> tuple[str, str]:
+    summary = str(item.get("summary") or "").casefold()
+    category = str(item.get("category") or "").casefold()
+    if historical:
+        return "historical", "The event is outside the current two-hour evidence window."
+    if re.search(
+        r"\b(?:starting|started|finished|stopping|stopped)\s+.+(?:service|session)\b|"
+        r"\bload(?:ed|ing) kernel module\b|\bsession (?:opened|closed)\b|"
+        r"\bmodprobe@.+(?:starting|started|finished|stopping|stopped)\b",
+        summary,
+    ):
+        return "routine_system_event", "Routine service or system lifecycle event."
+    if re.search(
+        r"timestamp.+(?:ahead|too new|out of order)|entry.+rejected|loki.+reject|"
+        r"ingestion.+delay|telemetry.+delay|scrape pipeline",
+        summary,
+    ):
+        return (
+            "monitoring_pipeline_issue",
+            "The anomaly affects monitoring ingestion or timestamp handling, not host resources.",
+        )
+    if re.search(r"firmware|dmi|metadata.+pars|configuration.+(?:invalid|error)", summary):
+        return (
+            "configuration_issue",
+            "Configuration or firmware metadata anomaly without current service-impact evidence.",
+        )
+    if re.search(
+        r"\b(?:outage|service (?:is )?down|unreachable|connection refused|"
+        r"fatal|panic|oom[- ]kill|out of memory|filesystem.+(?:read.only|failure)|"
+        r"i/o error)\b",
+        summary,
+    ):
+        return "active_operational_issue", "The message explicitly describes active degradation."
+    if category in {"oom", "crashes", "filesystem", "application_failures"}:
+        return "likely_operational_issue", "The event category can indicate operational impact."
+    if category in {"errors", "exceptions", "auth_failures", "restarts"}:
+        return (
+            "isolated_anomaly",
+            "An error-like event was observed without evidence of current host degradation.",
+        )
+    if category in {"warnings", "kernel"}:
+        return "informational", "The source/category alone does not establish impact."
+    return "unknown", "The available event metadata does not establish operational impact."
 
 
 def _health_assessment(
@@ -133,15 +219,13 @@ def _health_assessment(
         if ratio >= 1.5:
             raise_severity("critical")
             evidence.append(
-                f"1-minute load is {load:.2f} across {cpu_count:.0f} CPUs "
-                "(critical ≥ 1.5 per CPU)."
+                f"1-minute load is {load:.2f} across {cpu_count:.0f} CPUs (critical ≥ 1.5 per CPU)."
             )
             metric_issues.append("load")
         elif ratio >= 1.0:
             raise_severity("warning")
             evidence.append(
-                f"1-minute load is {load:.2f} across {cpu_count:.0f} CPUs "
-                "(warning ≥ 1.0 per CPU)."
+                f"1-minute load is {load:.2f} across {cpu_count:.0f} CPUs (warning ≥ 1.0 per CPU)."
             )
             metric_issues.append("load")
 
@@ -187,7 +271,7 @@ def _health_assessment(
         )
     }
     events_by_occurrence: dict[tuple[object, object], dict[str, Any]] = {}
-    for item in (log_evidence.get("evidence") or []):
+    for item in log_evidence.get("evidence") or []:
         if not isinstance(item, dict):
             continue
         key = (item.get("observed_at"), item.get("summary"))
@@ -201,120 +285,87 @@ def _health_assessment(
     relevant_events: list[dict[str, Any]] = []
     unrelated_events: list[dict[str, Any]] = []
     correlations: list[str] = []
-    performance_categories = {
-        "oom",
-        "crashes",
-        "exceptions",
-        "application_failures",
-        "restarts",
-        "filesystem",
-    }
+    correlation_details: list[dict[str, Any]] = []
     for item in raw_events:
         event_time = _as_datetime(item.get("observed_at"))
-        age_seconds = (
-            abs((metric_time - event_time).total_seconds()) if event_time else None
-        )
+        age_seconds = abs((metric_time - event_time).total_seconds()) if event_time else None
         temporally_aligned = age_seconds is not None and age_seconds <= 2 * 3600
-        category = str(item.get("category") or "")
-        if mode == "performance":
-            semantically_related = (
-                category in {"oom", "crashes", "exceptions", "restarts"}
-                or (
-                    bool(metric_issues)
-                    and category
-                    in performance_categories | {"errors", "warnings", "kernel"}
-                )
-            )
-        else:
-            semantically_related = category in {
-                "errors",
-                "warnings",
-                "restarts",
-                "crashes",
-                "exceptions",
-                "auth_failures",
-                "kernel",
-                "filesystem",
-                "oom",
-                "application_failures",
-            }
         enriched = dict(item)
-        if temporally_aligned and semantically_related:
-            enriched["relevance"] = "relevant"
+        impact, impact_reason = _classify_log_impact(item, historical=not temporally_aligned)
+        enriched["impact_classification"] = impact
+        enriched["impact_reason"] = impact_reason
+        if temporally_aligned and impact != "routine_system_event":
+            enriched["relevance"] = "observation"
             enriched["relevance_reason"] = (
-                f"The event occurred within {age_seconds / 60:.0f} minutes of the "
-                "Prometheus observation and matches the operational intent."
+                f"Observed {age_seconds / 60:.0f} minutes from the latest metrics snapshot; "
+                f"classified as {impact.replace('_', ' ')}."
             )
             relevant_events.append(enriched)
-            correlations.append(
-                f"{category.replace('_', ' ').title()} evidence occurred "
-                f"{age_seconds / 60:.0f} minutes from the Prometheus observation."
+            correlation_details.append(
+                {
+                    "event": item.get("summary") or "Log anomaly",
+                    "minutes_from_metrics": round(age_seconds / 60),
+                    "shared_asset_or_service": True,
+                    "current_metrics_support_impact": bool(metric_issues),
+                    "impact_classification": impact,
+                    "confidence": (
+                        "high"
+                        if impact == "active_operational_issue" and metric_issues
+                        else "medium"
+                        if impact in {"active_operational_issue", "likely_operational_issue"}
+                        else "low"
+                    ),
+                    "causation_established": False,
+                }
             )
         else:
             enriched["relevance"] = "unrelated"
-            if not temporally_aligned:
-                enriched["relevance_reason"] = (
-                    "The event is historical and outside the two-hour correlation window."
-                )
-            else:
-                enriched["relevance_reason"] = (
-                    "The event category does not explain the current operational question."
-                )
+            enriched["relevance_reason"] = impact_reason
             unrelated_events.append(enriched)
 
-    relevant_counts: dict[str, int] = {}
+    impact_counts: dict[str, int] = {}
     for item in relevant_events:
-        category = str(item.get("category") or "unknown")
-        relevant_counts[category] = relevant_counts.get(category, 0) + 1
-    for category, category_severity, statement, recommendation in (
-        (
-            "oom",
-            "critical",
-            "Loki contains out-of-memory evidence in the requested window.",
-            "Review memory pressure, process limits, and the OOM-killed workload.",
-        ),
-        (
-            "crashes",
-            "critical",
-            "Loki contains crash or panic evidence in the requested window.",
-            "Inspect the crash evidence and the affected service before restarting it.",
-        ),
-        (
-            "filesystem",
-            "critical",
-            "Loki contains filesystem or disk I/O failure evidence.",
-            "Inspect filesystem health and free space on the affected mount.",
-        ),
-        (
-            "exceptions",
-            "warning",
-            "Loki contains application exception evidence.",
-            "Review the most recent exception and its application context.",
-        ),
-        (
-            "auth_failures",
-            "warning",
-            "Loki contains authentication failure evidence.",
-            "Review the source and frequency of the authentication failures.",
-        ),
-        (
-            "restarts",
-            "warning",
-            "Loki contains service restart evidence.",
-            "Check service restart frequency and the preceding log evidence.",
-        ),
-        (
-            "errors",
-            "warning",
-            "Loki contains error evidence in the requested window.",
-            "Review the latest Loki error evidence for the affected component.",
-        ),
-    ):
-        count = relevant_counts.get(category)
-        if isinstance(count, int) and count > 0:
-            raise_severity(category_severity)
-            evidence.append(f"{statement} ({count} event{'s' if count != 1 else ''}).")
-            recommendations.append(recommendation)
+        impact = str(item.get("impact_classification") or "unknown")
+        impact_counts[impact] = impact_counts.get(impact, 0) + 1
+    active_count = impact_counts.get("active_operational_issue", 0)
+    likely_count = impact_counts.get("likely_operational_issue", 0)
+    if active_count:
+        raise_severity("critical" if metric_issues else "warning")
+        evidence.append(
+            f"{active_count} log event{'s' if active_count != 1 else ''} explicitly "
+            "describe active operational degradation."
+        )
+        recommendations.append("Review the active service-impact evidence and affected component.")
+    if any(str(item.get("category")) == "oom" for item in relevant_events):
+        recommendations.append(
+            "Review memory pressure, process limits, and the OOM-affected workload."
+        )
+    if likely_count and (metric_issues or likely_count >= 2):
+        raise_severity("warning")
+        evidence.append(
+            f"{likely_count} repeated or metric-supported log event"
+            f"{'s' if likely_count != 1 else ''} indicate a likely operational issue."
+        )
+    low_impact_count = len(relevant_events) - active_count - likely_count
+    if low_impact_count > 0 and not metric_issues:
+        evidence.append(
+            f"{low_impact_count} recent log anomal"
+            f"{'ies were' if low_impact_count != 1 else 'y was'} detected, but "
+            "none currently affects reachability, CPU, memory, disk, or monitored services."
+        )
+    if correlation_details:
+        closest = min(item["minutes_from_metrics"] for item in correlation_details)
+        correlations.append(
+            f"{len(correlation_details)} log anomal"
+            f"{'ies occurred' if len(correlation_details) != 1 else 'y occurred'} within "
+            f"{closest} minutes of the latest metrics snapshot. "
+            + (
+                "Current metrics support ongoing impact. "
+                if metric_issues
+                else "Current CPU, memory, disk, and reachability do not show ongoing degradation. "
+            )
+            + "Time proximity is correlation evidence; causation is not established."
+        )
     if log_evidence.get("error_code") and not log_evidence.get("evidence"):
         evidence.append(
             "Loki evidence is unknown: "
@@ -343,18 +394,13 @@ def _health_assessment(
         latest_event_time = max(
             (
                 value
-                for value in (
-                    _as_datetime(item.get("observed_at"))
-                    for item in relevant_events
-                )
+                for value in (_as_datetime(item.get("observed_at")) for item in relevant_events)
                 if value is not None
             ),
             default=None,
         )
         metrics_follow_events = bool(
-            latest_event_time
-            and metric_time
-            and metric_time >= latest_event_time
+            latest_event_time and metric_time and metric_time >= latest_event_time
         )
         if relevant_events and metrics_follow_events and not metric_issues:
             conclusion = (
@@ -441,6 +487,8 @@ def _health_assessment(
         "relevant_log_evidence": relevant_events,
         "unrelated_log_evidence": unrelated_events,
         "correlations": correlations,
+        "correlation_details": correlation_details,
+        "log_impact_counts": impact_counts,
         "thresholds": {
             "cpu_warning_percent": 75,
             "cpu_critical_percent": 90,
@@ -478,8 +526,28 @@ class OperationalToolExecutor:
         self.inventory = InventoryService(session)
         self.prometheus = PrometheusService(session, secrets, settings)
         self.loki = LokiService(session, secrets, settings)
+        self.zammad = ZammadService(session, secrets)
 
     async def execute(self, request: OperationalToolRequest) -> dict[str, Any]:
+        if request.tool_name == "search_tickets":
+            ticket_search = TicketSearchArguments.model_validate(request.arguments)
+            return await self.zammad.search_tickets(ticket_search.model_dump(mode="json"))
+        if request.tool_name == "get_ticket":
+            ticket_lookup = TicketArguments.model_validate(request.arguments)
+            if not ticket_lookup.ticket_number and not ticket_lookup.external_id:
+                raise ValueError("A ticket number or external ID is required")
+            return await self.zammad.get_ticket(ticket_lookup.model_dump(exclude_none=True))
+        if request.tool_name == "get_ticket_counts":
+            ticket_counts = TicketCountArguments.model_validate(request.arguments)
+            return await self.zammad.get_ticket_counts(ticket_counts.model_dump(mode="json"))
+        if request.tool_name == "get_asset_tickets":
+            asset_tickets = AssetTicketArguments.model_validate(request.arguments)
+            return await self.zammad.get_asset_tickets(asset_tickets.model_dump())
+        if request.tool_name == "correlate_tickets_with_evidence":
+            ticket_correlation = TicketCorrelationArguments.model_validate(request.arguments)
+            return await self.zammad.correlate_tickets_with_evidence(
+                ticket_correlation.model_dump(mode="json")
+            )
         if request.tool_name == "get_inventory_summary":
             EmptyArguments.model_validate(request.arguments)
             return await self.inventory.inventory_summary()
@@ -560,9 +628,7 @@ class OperationalToolExecutor:
                 status = await self.inventory.operational_asset_status(asset_id)
                 assert status is not None
                 try:
-                    logs = await self.loki.asset_evidence(
-                        model, limit_per_category=2
-                    )
+                    logs = await self.loki.asset_evidence(model, limit_per_category=2)
                 except LokiError as exc:
                     logs = {
                         "available": False,
@@ -588,7 +654,7 @@ class OperationalToolExecutor:
                     key=lambda item: str(item["observed_at"]),
                     reverse=True,
                 )
-                return {
+                result = {
                     "match_status": "found",
                     "asset": status,
                     "utilization": utilization,
@@ -600,12 +666,77 @@ class OperationalToolExecutor:
                         logs,
                         status_arguments.mode if status_arguments else "health",
                     ),
+                    "detail_level": (
+                        status_arguments.detail_level if status_arguments else "concise"
+                    ),
                     "evidence_sources": {
                         "inventory": "connector inventory",
                         "metrics": "prometheus",
                         "logs": "loki",
                     },
                 }
+                try:
+                    related_tickets = await self.zammad.get_asset_tickets(
+                        {"identifier": asset_arguments.identifier, "recently_closed_days": 30}
+                    )
+                    result["related_tickets"] = related_tickets
+                    assessment = result["assessment"]
+                    open_direct = related_tickets.get("open_tickets") or []
+                    closed_direct = related_tickets.get("recently_closed_tickets") or []
+                    non_health_types = {
+                        "service_request",
+                        "access_request",
+                        "maintenance",
+                        "change",
+                        "informational",
+                    }
+                    open_incidents = [
+                        item for item in open_direct if item.get("ticket_type") == "incident"
+                    ]
+                    ignored_open = [
+                        item for item in open_direct if item.get("ticket_type") in non_health_types
+                    ]
+                    current_support = assessment.get("overall_health") in {
+                        "warning",
+                        "critical",
+                    }
+                    result["ticket_health_context"] = {
+                        "open_incident_count": len(open_incidents),
+                        "closed_incident_count": sum(
+                            item.get("ticket_type") == "incident" for item in closed_direct
+                        ),
+                        "non_health_open_count": len(ignored_open),
+                        "current_evidence_supports_open_incident": bool(
+                            open_incidents and current_support
+                        ),
+                        "assessment": (
+                            "Open incidents have supporting current monitoring evidence."
+                            if open_incidents and current_support
+                            else (
+                                "Open tickets are contextual; current monitoring does not "
+                                "support active degradation."
+                            )
+                            if open_direct
+                            else (
+                                "Closed incidents are historical context and current monitoring "
+                                "shows no active recurrence."
+                            )
+                            if closed_direct and not current_support
+                            else "No ticket changes the monitoring-derived health state."
+                        ),
+                    }
+                except ZammadError as exc:
+                    result["related_tickets"] = {
+                        "availability": {
+                            "enabled": False,
+                            "state": "unavailable",
+                            "error_code": exc.code,
+                            "last_error": str(exc),
+                        },
+                        "open_tickets": [],
+                        "recently_closed_tickets": [],
+                    }
+                return result
             return {"match_status": "found", "utilization": utilization}
         raise ValueError("Unsupported operational tool")
 
@@ -668,6 +799,13 @@ class OperationalToolWorker:
                 error_code=exc.code,
                 error_message=str(exc)[:500],
             )
+        except ZammadError as exc:
+            submission = OperationalToolResult(
+                claim_token=request.claim_token,
+                status="failed",
+                error_code=exc.code,
+                error_message=str(exc)[:500],
+            )
         except Exception:
             submission = OperationalToolResult(
                 claim_token=request.claim_token,
@@ -682,4 +820,24 @@ class OperationalToolWorker:
             request.id,
             submission,
         )
+        if request.tool_name in {
+            "search_tickets",
+            "get_ticket",
+            "get_ticket_counts",
+            "get_asset_tickets",
+            "correlate_tickets_with_evidence",
+        }:
+            await SqlAlchemyOperationsRepository(self.session).record_event(
+                "zammad.operational_request",
+                f"Zammad operational request {submission.status}",
+                target_type="operational_tool_request",
+                target_id=str(request.id),
+                details={
+                    "tool_name": request.tool_name,
+                    "status": submission.status,
+                    "error_code": submission.error_code,
+                },
+                level="INFO" if submission.status == "completed" else "ERROR",
+                component="zammad",
+            )
         return True

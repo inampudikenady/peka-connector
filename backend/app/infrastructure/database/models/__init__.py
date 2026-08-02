@@ -23,6 +23,11 @@ from app.infrastructure.database.models.operations import (
 from app.infrastructure.database.models.scan import ScanHistoryModel
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.database.models.user import RefreshTokenModel, UserModel
+from app.infrastructure.database.models.zammad import (
+    ZammadConfigurationModel,
+    ZammadTicketArticleModel,
+    ZammadTicketModel,
+)
 
 __all__ = [
     "ApplicationLogModel",
@@ -48,4 +53,7 @@ __all__ = [
     "ScanHistoryModel",
     "SourceModel",
     "UserModel",
+    "ZammadConfigurationModel",
+    "ZammadTicketArticleModel",
+    "ZammadTicketModel",
 ]

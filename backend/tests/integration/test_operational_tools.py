@@ -80,19 +80,13 @@ async def test_inventory_tools_count_lookup_status_filter_and_tenant_local_data(
             SecretEncryptionService(get_settings().encryption_key),
         )
 
-        linux_count = await executor.execute(
-            _request("count_assets", {"os_family": "linux"})
-        )
+        linux_count = await executor.execute(_request("count_assets", {"os_family": "linux"}))
         total = await executor.execute(_request("get_inventory_summary", {}))
-        lookup = await executor.execute(
-            _request("get_asset_details", {"identifier": "UTIL001"})
-        )
+        lookup = await executor.execute(_request("get_asset_details", {"identifier": "UTIL001"}))
         fqdn = await executor.execute(
             _request("get_asset_details", {"identifier": "util001.example.test"})
         )
-        status = await executor.execute(
-            _request("get_asset_status", {"identifier": "util001"})
-        )
+        status = await executor.execute(_request("get_asset_status", {"identifier": "util001"}))
         missing = await executor.execute(
             _request(
                 "search_assets",
@@ -547,9 +541,7 @@ def test_timeline_assessment_explains_recovery_sequence_from_timestamps():
             "evidence": [
                 {
                     "category": "restarts",
-                    "observed_at": (
-                        metric_time - timedelta(minutes=5)
-                    ).isoformat(),
+                    "observed_at": (metric_time - timedelta(minutes=5)).isoformat(),
                     "summary": "Application restarted.",
                 }
             ],
@@ -561,3 +553,39 @@ def test_timeline_assessment_explains_recovery_sequence_from_timestamps():
     assert len(assessment["relevant_log_evidence"]) == 1
     assert "followed by a Prometheus observation" in assessment["conclusion"]
     assert "No later relevant failure" in assessment["conclusion"]
+
+
+def test_healthy_metrics_with_isolated_and_pipeline_anomalies_remain_healthy():
+    metric_time = datetime.now(UTC)
+    assessment = _health_assessment(
+        {"reachable": True},
+        {
+            "cpu_percent": 2.13,
+            "memory_percent": 17.18,
+            "disk_percent": 49.25,
+            "load_average_1m": 0.1,
+            "cpu_count": 4,
+            "metric_timestamp": metric_time,
+        },
+        {
+            "available": True,
+            "evidence": [
+                {
+                    "category": "errors",
+                    "observed_at": (metric_time - timedelta(minutes=10)).isoformat(),
+                    "summary": "Firmware metadata parsing error in DMI table",
+                },
+                {
+                    "category": "errors",
+                    "observed_at": (metric_time - timedelta(minutes=10)).isoformat(),
+                    "summary": "Loki rejected entry because timestamp was ahead of server",
+                },
+            ],
+        },
+    )
+    assert assessment["overall_health"] == "healthy"
+    impacts = {item["impact_classification"] for item in assessment["relevant_log_evidence"]}
+    assert impacts == {"configuration_issue", "monitoring_pipeline_issue"}
+    assert "none currently affects reachability" in " ".join(assessment["evidence"])
+    assert len(assessment["correlations"]) == 1
+    assert "causation is not established" in assessment["correlations"][0]

@@ -96,6 +96,10 @@ The local connector supports versioned CSV/XLSX CMDB imports, Prometheus active-
 and deterministic canonical inventory correlation. See
 [connector inventory](docs/inventory.md) for source authority, security, and matching rules.
 
+The optional read-only [Zammad integration](docs/ZAMMAD.md) synchronizes permitted ticket
+evidence locally, correlates it with canonical CMDB assets, and exposes bounded results through
+the existing operational assistant transport without sending the Zammad credential to SaaS.
+
 ## Optional unattended first run
 
 Set both `PEKA_BOOTSTRAP_ADMIN_USERNAME` and `PEKA_BOOTSTRAP_ADMIN_PASSWORD` before the first start. The account is created only while the user table is empty. Remove these values after provisioning. Interactive browser setup is the default and never creates a silent default account.

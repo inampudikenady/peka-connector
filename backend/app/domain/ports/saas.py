@@ -125,6 +125,11 @@ class OperationalToolRequest(BaseModel):
         "get_asset_status",
         "get_asset_utilization",
         "get_asset_log_evidence",
+        "search_tickets",
+        "get_ticket",
+        "get_ticket_counts",
+        "get_asset_tickets",
+        "correlate_tickets_with_evidence",
     ]
     arguments: dict[str, Any]
     expires_at: datetime

@@ -474,9 +474,7 @@ class PrometheusService:
             if isinstance(item.observed_fields_json, dict)
         ]
         actual_instances = [
-            str(fields["instance"]).strip()
-            for fields in target_fields
-            if fields.get("instance")
+            str(fields["instance"]).strip() for fields in target_fields if fields.get("instance")
         ]
         if not actual_instances:
             return {
@@ -499,8 +497,7 @@ class PrometheusService:
         last_scrapes = [
             str(fields["last_scrape"])
             for fields in target_fields
-            if fields.get("last_scrape")
-            and not str(fields["last_scrape"]).startswith("0001-")
+            if fields.get("last_scrape") and not str(fields["last_scrape"]).startswith("0001-")
         ]
         if not last_scrapes:
             return {
@@ -522,15 +519,13 @@ class PrometheusService:
         # (?:...) are rejected, so query the exact instance labels retained by
         # inventory correlation with a plain anchored alternation.
         instance_pattern = (
-            "^("
-            + "|".join(re.escape(value) for value in dict.fromkeys(actual_instances))
-            + ")$"
+            "^(" + "|".join(re.escape(value) for value in dict.fromkeys(actual_instances)) + ")$"
         )
         selector = f"instance=~{json.dumps(instance_pattern)}"
         expressions = {
             "cpu_percent": (
                 "100 - (avg by (instance) "
-                f"(rate(node_cpu_seconds_total{{mode=\"idle\",{selector}}}[5m])) * 100)"
+                f'(rate(node_cpu_seconds_total{{mode="idle",{selector}}}[5m])) * 100)'
             ),
             "memory_percent": (
                 f"(1 - (node_memory_MemAvailable_bytes{{{selector}}} / "
@@ -538,14 +533,14 @@ class PrometheusService:
             ),
             "disk_percent": (
                 "max by (instance) ((1 - "
-                f"(node_filesystem_avail_bytes{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}} / "
+                f'(node_filesystem_avail_bytes{{{selector},fstype!~"tmpfs|overlay|squashfs"}} / '
                 f"node_filesystem_size_bytes{{{selector},"
-                "fstype!~\"tmpfs|overlay|squashfs\"})) * 100)"
+                'fstype!~"tmpfs|overlay|squashfs"})) * 100)'
             ),
             "load_average_1m": f"node_load1{{{selector}}}",
             "cpu_count": (
                 "count by (instance) (count by (instance, cpu) "
-                f"(node_cpu_seconds_total{{mode=\"idle\",{selector}}}))"
+                f'(node_cpu_seconds_total{{mode="idle",{selector}}}))'
             ),
         }
         result: dict[str, Any] = {
@@ -584,9 +579,9 @@ class PrometheusService:
             timestamps.append(timestamp)
         filesystem_query = (
             "(1 - (node_filesystem_avail_bytes"
-            f"{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}} / "
+            f'{{{selector},fstype!~"tmpfs|overlay|squashfs"}} / '
             "node_filesystem_size_bytes"
-            f"{{{selector},fstype!~\"tmpfs|overlay|squashfs\"}})) * 100"
+            f'{{{selector},fstype!~"tmpfs|overlay|squashfs"}})) * 100'
         )
         filesystem_payload = await self._request(
             configuration,
@@ -619,9 +614,7 @@ class PrometheusService:
             key=lambda item: (-float(item["used_percent"]), str(item["mountpoint"])),
         )
         if filesystems:
-            result["disk_percent"] = max(
-                float(item["used_percent"]) for item in filesystems
-            )
+            result["disk_percent"] = max(float(item["used_percent"]) for item in filesystems)
 
         process_expressions = {
             "top_cpu_processes": (
@@ -630,7 +623,7 @@ class PrometheusService:
             ),
             "top_memory_processes": (
                 "topk(5, sum by (groupname) "
-                f"(namedprocess_namegroup_memory_bytes{{memtype=\"resident\",{selector}}}))"
+                f'(namedprocess_namegroup_memory_bytes{{memtype="resident",{selector}}}))'
             ),
         }
         for field, expression in process_expressions.items():
@@ -651,11 +644,7 @@ class PrometheusService:
                     numeric = float(value[1])
                 except (TypeError, ValueError, OverflowError):
                     continue
-                key = (
-                    "cpu_percent"
-                    if field == "top_cpu_processes"
-                    else "memory_bytes"
-                )
+                key = "cpu_percent" if field == "top_cpu_processes" else "memory_bytes"
                 processes.append(
                     {
                         "name": metric.get("groupname") or "unknown",
@@ -718,16 +707,13 @@ class PrometheusService:
                     detail = exc.response.json().get("error")
                 except ValueError:
                     detail = None
-                message = (
-                    "Prometheus rejected the fixed metrics query"
-                    + (f": {sanitize(str(detail))}" if detail else ".")
+                message = "Prometheus rejected the fixed metrics query" + (
+                    f": {sanitize(str(detail))}" if detail else "."
                 )
             else:
                 code = "HTTP_ERROR"
                 message = f"Prometheus returned HTTP {exc.response.status_code}."
-            raise PrometheusError(
-                code, str(message)[:500], 502
-            ) from exc
+            raise PrometheusError(code, str(message)[:500], 502) from exc
         except httpx.HTTPError as exc:
             raise self._network_error(exc) from exc
         except ValueError as exc:

@@ -16,6 +16,20 @@ from app.infrastructure.database.session import engine, session_factory
 from app.infrastructure.security.secrets import SecretEncryptionService
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Starting modprobe@sd_mod.service - Load Kernel Module sd_mod...",
+        "Finished modprobe@sd_mod.service - Load Kernel Module sd_mod.",
+        "Started routine.service.",
+        "Session opened for user root.",
+        "Session closed for user root.",
+    ],
+)
+def test_routine_lifecycle_messages_are_not_kernel_warnings(message):
+    assert _message_matches_category("kernel", message) is False
+
+
 async def _reset_database() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
@@ -73,9 +87,7 @@ async def test_dynamic_loki_discovery_and_asset_evidence_use_fixed_logql(monkeyp
             if "/label/source/" in path:
                 return {"status": "success", "data": ["syslog"]}
             assert path == "/loki/api/v1/series"
-            discovery_selectors.extend(
-                value for key, value in params if key == "match[]"
-            )
+            discovery_selectors.extend(value for key, value in params if key == "match[]")
             return {
                 "status": "success",
                 "data": [

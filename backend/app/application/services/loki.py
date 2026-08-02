@@ -126,9 +126,7 @@ def _selector(labels: dict[str, Any]) -> str:
     }
     if not usable:
         raise LokiError("LOKI_STREAM_NOT_FOUND", "The discovered Loki stream has no usable labels.")
-    matchers = ",".join(
-        f'{key}="{_escape_logql(usable[key])}"' for key in sorted(usable)
-    )
+    matchers = ",".join(f'{key}="{_escape_logql(usable[key])}"' for key in sorted(usable))
     return "{" + matchers + "}"
 
 
@@ -214,9 +212,7 @@ class LokiService:
             raise LokiError("INVALID_TIMEOUT", "Timeout must be between 1 and 120 seconds.")
         model.discovery_lookback_days = int(values.get("discovery_lookback_days", 30))
         if not 1 <= model.discovery_lookback_days <= 90:
-            raise LokiError(
-                "INVALID_LOOKBACK", "Discovery lookback must be between 1 and 90 days."
-            )
+            raise LokiError("INVALID_LOOKBACK", "Discovery lookback must be between 1 and 90 days.")
         model.enabled = bool(values.get("enabled", True))
         self.session.add(model)
         await self.session.commit()
@@ -264,9 +260,7 @@ class LokiService:
         try:
             labels_payload = await self._request(configuration, "/loki/api/v1/labels")
             labels = sorted(
-                str(value)
-                for value in labels_payload.get("data", [])
-                if isinstance(value, str)
+                str(value) for value in labels_payload.get("data", []) if isinstance(value, str)
             )
             values: dict[str, list[str]] = {}
             for label in labels:
@@ -274,9 +268,7 @@ class LokiService:
                     configuration,
                     f"/loki/api/v1/label/{quote(label, safe='')}/values",
                 )
-                values[label] = [
-                    str(value) for value in payload.get("data", [])[:500]
-                ]
+                values[label] = [str(value) for value in payload.get("data", [])[:500]]
 
             now = datetime.now(UTC)
             streams_by_key: dict[str, dict[str, Any]] = {}
@@ -287,9 +279,7 @@ class LokiService:
                     "Loki is reachable but exposes no stream labels in the configured tenant.",
                 )
             selector_labels = [
-                label
-                for label in labels
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label)
+                label for label in labels if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label)
             ]
             if not selector_labels:
                 raise LokiError(
@@ -298,9 +288,7 @@ class LokiService:
                 )
             # Loki 2.9 can reject broad TSDB series scans. Daily windows are bounded,
             # deterministic, and cover streams that do not share any one label.
-            discovery_selectors = [
-                "{" + label + '=~".+"}' for label in selector_labels
-            ]
+            discovery_selectors = ["{" + label + '=~".+"}' for label in selector_labels]
             for offset in range(configuration.discovery_lookback_days):
                 end = now - timedelta(days=offset)
                 start = end - timedelta(days=1)
@@ -318,13 +306,9 @@ class LokiService:
                     if not isinstance(raw, dict):
                         continue
                     labels_map = {
-                        str(key): str(value)
-                        for key, value in raw.items()
-                        if value is not None
+                        str(key): str(value) for key, value in raw.items() if value is not None
                     }
-                    key = sha256(
-                        json.dumps(labels_map, sort_keys=True).encode()
-                    ).hexdigest()
+                    key = sha256(json.dumps(labels_map, sort_keys=True).encode()).hexdigest()
                     streams_by_key[key] = labels_map
                     stream_windows.setdefault(
                         key,
@@ -335,8 +319,7 @@ class LokiService:
                 "label_values": values,
                 "streams": list(streams_by_key.values()),
                 "stream_windows": [
-                    {"stream_key": key, **stream_windows[key]}
-                    for key in streams_by_key
+                    {"stream_key": key, **stream_windows[key]} for key in streams_by_key
                 ],
                 "stream_count": len(streams_by_key),
                 "discovered_at": now.isoformat(),
@@ -442,9 +425,7 @@ class LokiService:
         for item in evidence:
             key = (item["observed_at"], item["category"], item["summary"])
             unique[key] = item
-        timeline = sorted(
-            unique.values(), key=lambda item: item["observed_at"], reverse=True
-        )
+        timeline = sorted(unique.values(), key=lambda item: item["observed_at"], reverse=True)
         last_log_at = max(
             (item["observed_at"] for item in timeline),
             default=None,
@@ -503,17 +484,12 @@ class LokiService:
         services = list(
             (
                 await self.session.scalars(
-                    select(InventoryServiceModel).where(
-                        InventoryServiceModel.asset_id == asset.id
-                    )
+                    select(InventoryServiceModel).where(InventoryServiceModel.asset_id == asset.id)
                 )
             ).all()
         )
         by_source["service"] = [
-            str(value)
-            for item in services
-            for value in (item.name, item.endpoint)
-            if value
+            str(value) for item in services for value in (item.name, item.endpoint) if value
         ]
         candidates = {
             normalized
@@ -603,9 +579,7 @@ class LokiService:
         try:
             verify: bool | ssl.SSLContext = configuration.tls_verify
             if configuration.tls_verify:
-                verify = await TrustedCertificateService(
-                    self.session, self.settings
-                ).ssl_context()
+                verify = await TrustedCertificateService(self.session, self.settings).ssl_context()
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(configuration.request_timeout_seconds),
                 verify=verify,
@@ -634,8 +608,7 @@ class LokiService:
             elif exc.response.status_code in {400, 422}:
                 code, message = (
                     "LOKI_QUERY_REJECTED",
-                    "Loki rejected a fixed connector query"
-                    + (f": {detail}" if detail else "."),
+                    "Loki rejected a fixed connector query" + (f": {detail}" if detail else "."),
                 )
             elif exc.response.status_code == 429:
                 code, message = (
@@ -659,9 +632,7 @@ class LokiService:
         if not isinstance(payload, dict) or (
             require_loki_envelope and payload.get("status") != "success"
         ):
-            raise LokiError(
-                "INVALID_LOKI_RESPONSE", "Loki returned an invalid response.", 502
-            )
+            raise LokiError("INVALID_LOKI_RESPONSE", "Loki returned an invalid response.", 502)
         return payload
 
     @staticmethod
@@ -685,9 +656,7 @@ class LokiService:
                 )
             cause = cause.__cause__ or cause.__context__
         if "connection refused" in detail:
-            return LokiError(
-                "CONNECTION_REFUSED", "The Loki host refused the TCP connection.", 502
-            )
+            return LokiError("CONNECTION_REFUSED", "The Loki host refused the TCP connection.", 502)
         return LokiError("CONNECTION_FAILED", "Loki could not be reached.", 502)
 
     async def _get(self, configuration_id: UUID) -> LokiConfigurationModel:
@@ -736,13 +705,17 @@ class LokiService:
 def _message_matches_category(category: str, message: str) -> bool:
     """Reject lexical LogQL matches that do not express the requested event."""
     lower = message.casefold()
-    structured_error = bool(
-        re.search(r"\blevel\s*=\s*[\"']?(?:error|fatal|critical)\b", lower)
+    structured_error = bool(re.search(r"\blevel\s*=\s*[\"']?(?:error|fatal|critical)\b", lower))
+    normal_lifecycle = bool(
+        re.search(
+            r"^(?:starting|started|finished|stopping|stopped)\s+|"
+            r"\bsession (?:opened|closed)\b|\bloaded kernel module\b",
+            lower,
+        )
     )
-    normal_lifecycle = lower.startswith(("starting ", "finished ", "started "))
+    if normal_lifecycle and not structured_error:
+        return False
     if category == "errors":
-        if normal_lifecycle and not structured_error:
-            return False
         return structured_error or bool(
             re.search(
                 r"\b(fatal|critical|failure|failed to|failed with|"
@@ -760,4 +733,12 @@ def _message_matches_category(category: str, message: str) -> bool:
         )
     if category == "warnings":
         return bool(re.search(r"\b(level\s*=\s*[\"']?warn|warning|warn:)\b", lower))
+    if category == "kernel":
+        return bool(
+            re.search(
+                r"\b(call trace|soft lockup|hard lockup|machine check|kernel panic|"
+                r"kernel bug|kernel oops)\b",
+                lower,
+            )
+        )
     return True

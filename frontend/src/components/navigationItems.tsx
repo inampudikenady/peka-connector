@@ -10,6 +10,7 @@ import StorageOutlinedIcon from '@mui/icons-material/StorageOutlined';
 import DnsOutlinedIcon from '@mui/icons-material/DnsOutlined';
 import Inventory2OutlinedIcon from '@mui/icons-material/Inventory2Outlined';
 import SubjectOutlinedIcon from '@mui/icons-material/SubjectOutlined';
+import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
 import type { ReactNode } from 'react';
 
 export interface NavItem { label: string; path: string; icon: ReactNode; adminOnly?: boolean }
@@ -21,6 +22,7 @@ export const navigationItems: NavItem[] = [
   { label: 'CMDB', path: '/cmdb', icon: <StorageOutlinedIcon /> },
   { label: 'Prometheus', path: '/prometheus', icon: <DnsOutlinedIcon /> },
   { label: 'Loki', path: '/loki', icon: <SubjectOutlinedIcon /> },
+  { label: 'Zammad', path: '/zammad', icon: <ConfirmationNumberOutlinedIcon /> },
   { label: 'Inventory', path: '/inventory', icon: <Inventory2OutlinedIcon /> },
   { label: 'Activity', path: '/activity', icon: <TimelineOutlinedIcon /> },
   { label: 'Logs', path: '/logs', icon: <DescriptionOutlinedIcon /> },

@@ -51,6 +51,15 @@ export interface LokiConfiguration {
   stream_count: number; labels: string[]; label_values: Record<string, string[]>;
   warnings: string[];
 }
+export interface ZammadConfiguration {
+  id: string; name: string; base_url: string; token_configured: boolean;
+  tls_verify: boolean; request_timeout_seconds: number; sync_interval_seconds: number;
+  history_window_days: number; group_filters: string[]; include_closed_tickets: boolean;
+  enabled: boolean; connection_state: string; last_successful_test_at: string | null;
+  last_successful_sync_at: string | null; last_sync_duration_seconds: number | null;
+  synchronized_ticket_count: number; synchronized_article_count: number;
+  last_error: string | null; next_scheduled_sync_at: string | null;
+}
 export interface TrustedCertificateAuthority {
   id: string; name: string; original_filename: string; fingerprint_sha256: string;
   subject: string; issuer: string; not_valid_before: string; not_valid_after: string;
