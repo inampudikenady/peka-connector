@@ -1,4 +1,4 @@
-# Managed document delivery
+# Managed local document knowledge
 
 ## Directory and deployment
 
@@ -34,18 +34,24 @@ Defaults are 100 MB per file, 20 files per request, 500 MB per request, and 255 
 
 UI requests stream one-megabyte chunks to a generated temporary filename. Limits and SHA-256 are evaluated while streaming; the file is fsynced and atomically renamed only after validation. Direct-copy files must retain the same size and modification time across checks and remain stable for the configured window.
 
-Local states include Discovered, Waiting For Stability, Ready, Queued, Uploading, Uploaded, Upload Failed, Unsupported, and Deleted. PEKA delivery status is tracked separately; the connector does not infer PEKA parsing or indexing state.
+Local knowledge states include Pending, Indexed, Failed, Delete Pending, and Deleted. Every stable
+content hash is normalized, sanitized, chunked, embedded locally, and reconciled by stable
+document ID. Indexing work is rebuilt from durable SQLite state after restart. An unavailable
+Local Knowledge Store does not remove the original file or stop live integrations.
 
-Every stable version creates an immutable spool snapshot and SQLite job. UPSERT and DELETE jobs survive restart, prevent duplicate active versions, recover stale in-progress work, retry transient failures with bounded exponential backoff and jitter, and reuse one idempotency key after ambiguous timeouts. Authentication failures are visible and are not retried aggressively. Validation failures require a corrected file or explicit administrative action.
+## Retrieval contract
 
-## Expected PEKA contract
-
-`POST /api/v1/connectors/{connector_id}/documents` uses the existing Bearer connector credential, `X-PEKA-Connector-ID`, and `Idempotency-Key`. UPSERT is multipart with original bytes plus a JSON metadata envelope containing source/document identity, relative path, filename, MIME type, byte size, `sha256:<hash>`, modification time, operation, and connector version. DELETE is a metadata-only tombstone. The payload never selects `tenant_id`; PEKA derives ownership from authenticated credentials.
-
-The connector marks a version uploaded only after a response with `accepted: true` and, for UPSERT, an acknowledged hash exactly matching the sent hash. Timeouts and connection closes are ambiguous and retry with the same key. If the endpoint is unavailable, production never fabricates success: jobs remain failed-retryable with an accurate safe error.
+The connector exposes authenticated `POST /api/v1/knowledge/search` for local administration.
+PEKA SaaS queues the same bounded `knowledge_search` operation through its existing connector
+request channel. The connector always derives tenant scope from registration and never accepts a
+tenant override from either request.
 
 ## Deletion
 
-Deleting a UI-uploaded document asks: “Delete this document from the connector and PEKA?” The local file is removed immediately, the logical record is tombstoned, and remote deletion retries until acknowledged. The tombstone prevents accidental rediscovery. Files copied by an operator must be removed by that operator; future external-source plugins must not delete customer source files.
+Deleting a UI-uploaded document removes the local file, records a durable tombstone, and deletes
+all matching Local Knowledge Store chunks. If the store is unavailable, the tombstone remains
+Delete Pending for retry. Files copied by an operator must be removed by that operator; future
+external-source plugins must not delete customer source files.
 
-PEKA—not the connector—performs parsing, OCR, chunking, embeddings, Qdrant/vector indexing, retrieval, and AI.
+The connector performs extraction for supported text-bearing files, chunking, local embeddings,
+indexing, and retrieval. OCR and AI inference are not part of this release.

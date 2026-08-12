@@ -1,5 +1,6 @@
 from app.infrastructure.database.models.certificate import TrustedCertificateAuthorityModel
 from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
+from app.infrastructure.database.models.integration import ConnectorIntegrationModel
 from app.infrastructure.database.models.inventory import (
     CMDBDatasetModel,
     CMDBDatasetVersionModel,
@@ -21,6 +22,14 @@ from app.infrastructure.database.models.operations import (
     ProductSettingsModel,
 )
 from app.infrastructure.database.models.scan import ScanHistoryModel
+from app.infrastructure.database.models.servicenow import (
+    ServiceNowCIModel,
+    ServiceNowConfigurationModel,
+    ServiceNowJournalModel,
+    ServiceNowRecordModel,
+    ServiceNowRelationshipModel,
+    ServiceNowSyncCursorModel,
+)
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.database.models.user import RefreshTokenModel, UserModel
 from app.infrastructure.database.models.zammad import (
@@ -46,6 +55,7 @@ __all__ = [
     "InventoryIdentityModel",
     "InventoryObservationModel",
     "InventoryServiceModel",
+    "ConnectorIntegrationModel",
     "LokiConfigurationModel",
     "PrometheusConfigurationModel",
     "ProductSettingsModel",
@@ -56,4 +66,10 @@ __all__ = [
     "ZammadConfigurationModel",
     "ZammadTicketArticleModel",
     "ZammadTicketModel",
+    "ServiceNowCIModel",
+    "ServiceNowConfigurationModel",
+    "ServiceNowJournalModel",
+    "ServiceNowRecordModel",
+    "ServiceNowRelationshipModel",
+    "ServiceNowSyncCursorModel",
 ]

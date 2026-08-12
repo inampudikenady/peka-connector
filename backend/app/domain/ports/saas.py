@@ -5,7 +5,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-ConnectorCapabilityName = Literal["filesystem_documents", "operational_tools"]
+ConnectorCapabilityName = Literal[
+    "filesystem_documents", "operational_tools", "local_knowledge"
+]
 
 
 class ConnectorRegistrationRequest(BaseModel):
@@ -52,6 +54,13 @@ class SourceHeartbeatSummary(BaseModel):
         return self
 
 
+class LocalKnowledgeStoreSummary(BaseModel):
+    status: Literal["healthy", "degraded", "unavailable"]
+    documents: int = Field(ge=0)
+    indexed_chunks: int = Field(ge=0)
+    last_index_activity: datetime | None = None
+
+
 class ConnectorHeartbeatRequest(BaseModel):
     instance_id: UUID
     name: str = Field(min_length=1, max_length=255, pattern=r"^[^\x00-\x1f]+$")
@@ -66,6 +75,7 @@ class ConnectorHeartbeatRequest(BaseModel):
     uptime_seconds: int = Field(ge=0)
     sources: SourceHeartbeatSummary
     capabilities: list[ConnectorCapabilityName] = Field(default_factory=list, max_length=32)
+    local_knowledge_store: LocalKnowledgeStoreSummary
 
     @field_validator("timestamp")
     @classmethod
@@ -130,6 +140,19 @@ class OperationalToolRequest(BaseModel):
         "get_ticket_counts",
         "get_asset_tickets",
         "correlate_tickets_with_evidence",
+        "get_all_ticket_sources",
+        "ticketing_search_records",
+        "servicenow_get_status",
+        "servicenow_get_incident",
+        "servicenow_search_incidents",
+        "servicenow_list_open_incidents",
+        "servicenow_get_incident_updates",
+        "servicenow_get_ci",
+        "servicenow_get_ci_relationships",
+        "servicenow_get_ci_tickets",
+        "servicenow_search_problems",
+        "servicenow_search_changes",
+        "knowledge_search",
     ]
     arguments: dict[str, Any]
     expires_at: datetime

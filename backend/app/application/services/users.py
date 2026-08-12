@@ -29,17 +29,23 @@ class UserService:
     async def list_users(self) -> Sequence[UserAccount]:
         return await self._users.list()
 
-    async def create_user(self, username: str, password: str, role: str) -> UserAccount:
+    async def create_user(
+        self, username: str, password: str, role: str, active: bool = True
+    ) -> UserAccount:
         clean_username = validate_username(username)
         validate_password(password, clean_username)
         if role not in VALID_ROLES:
             raise ValueError("Role must be administrator or read_only")
         if await self._users.get_by_username(clean_username):
             raise UsernameConflictError("Username already exists")
-        return await self._users.create(clean_username, hash_password(password), role)
+        return await self._users.create(clean_username, hash_password(password), role, active)
 
-    async def set_active(self, user_id: UUID, active: bool) -> UserAccount:
+    async def set_active(
+        self, user_id: UUID, active: bool, actor_id: UUID | None = None
+    ) -> UserAccount:
         user = await self._require(user_id)
+        if not active and actor_id is not None and user.id == actor_id:
+            raise UserSafeguardError("You cannot disable your own account")
         if (
             not active
             and user.is_active

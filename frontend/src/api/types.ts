@@ -3,7 +3,10 @@ export type Role = 'administrator' | 'read_only';
 export interface CurrentUser { id: string; username: string; role: Role }
 export interface SetupStatus { setup_required: boolean }
 export interface LoginResponse { access_token: string; expires_in: number; token_type: 'bearer' }
-export interface Health { status: 'healthy'; version: string }
+export interface Health {
+  status: 'healthy' | 'degraded'; version: string;
+  components: Record<string, { status: 'healthy' | 'unavailable' }>;
+}
 export type CMDBImportMode = 'create_new' | 'new_version';
 
 export interface CMDBDataset {
@@ -59,6 +62,29 @@ export interface ZammadConfiguration {
   last_successful_sync_at: string | null; last_sync_duration_seconds: number | null;
   synchronized_ticket_count: number; synchronized_article_count: number;
   last_error: string | null; next_scheduled_sync_at: string | null;
+}
+export interface ServiceNowConfiguration {
+  id: string; integration_id: string; integration: 'servicenow'; enabled: boolean;
+  configured: boolean; instance_url: string; username: string; password_configured: boolean;
+  verify_tls: boolean; request_timeout_seconds: number; page_size: number;
+  sync_interval_seconds: number; connection_state: string; connected: boolean;
+  last_test_at: string | null; last_successful_test_at: string | null;
+  last_successful_sync_at: string | null; last_sync_error: string | null;
+  next_scheduled_sync_at: string | null; counts: Record<string, number>;
+  availability: { enabled: boolean; state: string; cache_timestamp: string | null; stale: boolean; last_error: string | null };
+}
+export interface IntegrationCatalogItem {
+  integration_type: string; name: string; category: string; provider_roles: string[];
+  capabilities: Record<string, boolean>; available: boolean;
+  unavailable_reason?: string; configuration_fields: string[];
+}
+export interface ConnectorIntegration {
+  id: string; integration_type: string; display_name: string; category: string;
+  enabled: boolean; status: string; configuration: Record<string, unknown>;
+  capabilities: Record<string, boolean>; last_tested_at: string | null;
+  last_successful_test_at: string | null; last_successful_sync_at: string | null;
+  initial_sync_status: string; last_error: string | null;
+  created_at: string; updated_at: string;
 }
 export interface TrustedCertificateAuthority {
   id: string; name: string; original_filename: string; fingerprint_sha256: string;
@@ -129,9 +155,25 @@ export interface ActivityEvent {
   id: string; event_type: string; actor_username: string | null; target_type: string | null;
   target_id: string | null; message: string; created_at: string;
   outcome: 'success' | 'warning' | 'failure' | 'information';
+  integration?: string | null;
 }
 
 export interface PaginatedActivity { items: ActivityEvent[]; total: number; page: number; page_size: number }
+
+export interface OperationalRequestRecord {
+  request_id: string; requested_at: string; completed_at: string | null;
+  tool_name: string; integration: string; target_asset: string | null;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'expired' | 'cancelled';
+  duration_ms: number | null; result_summary: string | null; error_code: string | null;
+}
+export interface PaginatedOperationalRequests {
+  items: OperationalRequestRecord[]; total: number; page: number; page_size: number;
+}
+export interface ActivityOverview {
+  pending_requests: number; running_requests: number; failed_requests: number;
+  successful_requests_24h: number; recent_warnings_or_failures: ActivityEvent[];
+  last_heartbeat_at: string | null; last_completed_sync_at: string | null;
+}
 
 export interface LogEntry {
   id: string; level: string; component: string; message: string;
@@ -142,8 +184,12 @@ export interface PaginatedLogs { items: LogEntry[]; total: number; page: number;
 
 export interface Overview {
   connector_status: string; saas_status: string; last_heartbeat_at: string | null; connector_version: string;
+  peka_connector: string; components: Record<string, string>;
+  knowledge_store: KnowledgeStoreOverview;
   source_count: number; enabled_source_count: number; unhealthy_source_count: number;
   recent_events: ActivityEvent[]; storage_total_bytes: number | null; storage_free_bytes: number | null;
+  enabled_integration_count: number; healthy_integration_count: number;
+  attention_integration_count: number; recent_integration_failures: ActivityEvent[];
   connector_display_name: string; instance_id: string; connector_id: string | null; tenant_id: string | null;
   next_heartbeat_at: string | null; heartbeat_failure_count: number;
   last_heartbeat_error: string | null;
@@ -155,6 +201,17 @@ export interface Overview {
   last_document_delivery_at: string | null; document_endpoint_status: string;
   document_source_health: string; document_source_last_scan_at: string | null;
   document_source_next_scan_at: string | null;
+}
+
+export interface KnowledgeStoreOverview {
+  status: 'healthy' | 'degraded' | 'unavailable'; engine: 'qdrant';
+  engine_version: string | null; collection: string;
+  documents: number; chunks: number; pending: number; failed: number;
+  last_indexed_at: string | null; last_search_at: string | null;
+  checks: {
+    qdrant_reachable: boolean; collection_exists: boolean; collection_accessible: boolean;
+    statistics_readable: boolean; search_service_operational: boolean;
+  };
 }
 
 export interface DiagnosticCheck { name: string; status: string; detail: string }
@@ -194,6 +251,7 @@ export interface ManagedDocument {
   normalized_filename: string; extension: string; mime_type: string; size_bytes: number;
   content_hash: string; modified_at: string; discovered_at: string; first_seen_at: string;
   last_seen_at: string; state: string; local_status: string; delivery_status: string; upload_attempt_count: number;
+  knowledge_status: string; indexed_chunk_count: number; knowledge_error: string | null;
   last_upload_attempt_at: string | null; uploaded_at: string | null;
   remote_document_id: string | null; remote_version_id: string | null;
   last_error_code: string | null; last_error_message: string | null;

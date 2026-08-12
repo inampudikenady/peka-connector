@@ -10,10 +10,13 @@ from app.application.services.auth import AuthenticationService
 from app.application.services.certificates import TrustedCertificateService
 from app.application.services.cmdb import CMDBService
 from app.application.services.documents import ManagedDocumentService
+from app.application.services.integrations import IntegrationService
 from app.application.services.inventory import InventoryService
+from app.application.services.knowledge import LocalKnowledgeService
 from app.application.services.loki import LokiService
 from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import RegistrationService
+from app.application.services.servicenow import ServiceNowService
 from app.application.services.sources import SourceService
 from app.application.services.users import UserService
 from app.application.services.zammad import ZammadService
@@ -66,6 +69,10 @@ def get_document_service(session: SessionDep, settings: SettingsDep) -> ManagedD
     return ManagedDocumentService(session, settings)
 
 
+def get_knowledge_service(session: SessionDep, settings: SettingsDep) -> LocalKnowledgeService:
+    return LocalKnowledgeService(session, settings)
+
+
 def get_cmdb_service(session: SessionDep, settings: SettingsDep) -> CMDBService:
     return CMDBService(session, settings)
 
@@ -90,6 +97,14 @@ def get_loki_service(session: SessionDep, settings: SettingsDep) -> LokiService:
 
 def get_zammad_service(session: SessionDep, settings: SettingsDep) -> ZammadService:
     return ZammadService(session, SecretEncryptionService(settings.encryption_key))
+
+
+def get_servicenow_service(session: SessionDep, settings: SettingsDep) -> ServiceNowService:
+    return ServiceNowService(session, SecretEncryptionService(settings.encryption_key))
+
+
+def get_integration_service(session: SessionDep, settings: SettingsDep) -> IntegrationService:
+    return IntegrationService(session, SecretEncryptionService(settings.encryption_key))
 
 
 def get_registration_service(session: SessionDep, settings: SettingsDep) -> RegistrationService:
@@ -149,10 +164,13 @@ SourceServiceDep = Annotated[SourceService, Depends(get_source_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 OperationsDep = Annotated[SqlAlchemyOperationsRepository, Depends(get_operations_repository)]
 DocumentServiceDep = Annotated[ManagedDocumentService, Depends(get_document_service)]
+KnowledgeServiceDep = Annotated[LocalKnowledgeService, Depends(get_knowledge_service)]
 CMDBServiceDep = Annotated[CMDBService, Depends(get_cmdb_service)]
 CertificateServiceDep = Annotated[TrustedCertificateService, Depends(get_certificate_service)]
 InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
 PrometheusServiceDep = Annotated[PrometheusService, Depends(get_prometheus_service)]
 LokiServiceDep = Annotated[LokiService, Depends(get_loki_service)]
 ZammadServiceDep = Annotated[ZammadService, Depends(get_zammad_service)]
+ServiceNowServiceDep = Annotated[ServiceNowService, Depends(get_servicenow_service)]
+IntegrationServiceDep = Annotated[IntegrationService, Depends(get_integration_service)]
 RegistrationServiceDep = Annotated[RegistrationService, Depends(get_registration_service)]

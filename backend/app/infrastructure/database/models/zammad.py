@@ -45,14 +45,24 @@ class ZammadTicketModel(Base):
     __table_args__ = (
         UniqueConstraint("configuration_id", "external_id"),
         UniqueConstraint("configuration_id", "number"),
+        UniqueConstraint("integration_id", "source_record_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    configuration_id: Mapped[UUID] = mapped_column(
-        ForeignKey("zammad_configurations.id", ondelete="CASCADE"), index=True
+    configuration_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("zammad_configurations.id", ondelete="CASCADE"), index=True, default=None
     )
     instance_key: Mapped[str] = mapped_column(String(64), index=True)
     source: Mapped[str] = mapped_column(String(32), default="zammad")
+    connector_id: Mapped[str] = mapped_column(String(200), index=True, default="local")
+    integration_type: Mapped[str] = mapped_column(String(64), index=True, default="zammad")
+    integration_id: Mapped[UUID] = mapped_column(
+        ForeignKey("connector_integrations.id", ondelete="RESTRICT"), index=True
+    )
+    source_record_id: Mapped[str] = mapped_column(String(100), index=True, default="")
+    source_updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    synced_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True, default=utcnow)
+    cache_status: Mapped[str] = mapped_column(String(32), index=True, default="active")
     external_id: Mapped[str] = mapped_column(String(100), index=True)
     number: Mapped[str] = mapped_column(String(100), index=True)
     title: Mapped[str] = mapped_column(String(1000), index=True)

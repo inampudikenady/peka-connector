@@ -12,6 +12,7 @@ from app.domain.ports.saas import (
     ConnectorHeartbeatRequest,
     ConnectorRegistrationRequest,
     DocumentDeliveryMetadata,
+    LocalKnowledgeStoreSummary,
     OperationalToolResult,
     SaaSClientError,
     SourceHeartbeatSummary,
@@ -34,6 +35,9 @@ def heartbeat_request() -> ConnectorHeartbeatRequest:
         uptime_seconds=123,
         sources=SourceHeartbeatSummary(total=0, healthy=0, unhealthy=0, disabled=0),
         capabilities=["filesystem_documents"],
+        local_knowledge_store=LocalKnowledgeStoreSummary(
+            status="healthy", documents=2, indexed_chunks=7
+        ),
     )
 
 
@@ -223,6 +227,9 @@ async def test_final_registration_contract_serialization_and_response() -> None:
             environment="production",
             instance_id="41ed86ec-58d1-4ac3-9107-ff2c47ca11cc",
             capabilities=["filesystem_documents"],
+            local_knowledge_store=LocalKnowledgeStoreSummary(
+                status="healthy", documents=2, indexed_chunks=7
+            ),
         ),
     )
     assert captured == {
@@ -437,6 +444,9 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
             uptime_seconds=12345,
             sources=SourceHeartbeatSummary(total=1, healthy=1, unhealthy=0, disabled=0),
             capabilities=["filesystem_documents"],
+            local_knowledge_store=LocalKnowledgeStoreSummary(
+                status="healthy", documents=2, indexed_chunks=7
+            ),
         ),
     )
     assert captured["path"] == f"/api/v1/connectors/{connector_id}/heartbeat"
@@ -454,6 +464,12 @@ async def test_final_contract_serialization_and_heartbeat_response() -> None:
         "uptime_seconds": 12345,
         "sources": {"total": 1, "healthy": 1, "unhealthy": 0, "disabled": 0},
         "capabilities": ["filesystem_documents"],
+        "local_knowledge_store": {
+            "status": "healthy",
+            "documents": 2,
+            "indexed_chunks": 7,
+            "last_index_activity": None,
+        },
     }
     assert response.accepted
     assert response.next_heartbeat_seconds == 240
@@ -587,3 +603,41 @@ async def test_operational_tool_poll_returns_none_for_no_content() -> None:
         "connector-secret",
     )
     assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "ticketing_search_records",
+        "servicenow_list_open_incidents",
+        "servicenow_get_incident_updates",
+        "servicenow_get_ci_relationships",
+    ],
+)
+async def test_operational_tool_poll_accepts_normalized_and_servicenow_tools(
+    tool_name: str,
+) -> None:
+    client = client_for(
+        httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "id": "da67ea16-dca6-41f4-b836-a5338e65e667",
+                    "tool_name": tool_name,
+                    "arguments": {},
+                    "expires_at": "2026-08-05T01:00:30Z",
+                    "claim_token": "claim-token-long-enough",
+                },
+            )
+        )
+    )
+
+    result = await client.claim_operational_tool(
+        "https://peka.example.test",
+        UUID("7dca1b71-b55d-48d6-a20b-bf7cb5552368"),
+        "connector-secret",
+    )
+
+    assert result is not None
+    assert result.tool_name == tool_name

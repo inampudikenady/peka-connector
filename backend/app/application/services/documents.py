@@ -607,7 +607,8 @@ class ManagedDocumentService:
                 first_seen_at=now,
                 last_seen_at=now,
                 local_status="READY",
-                delivery_status="PENDING",
+                delivery_status="LOCAL_ONLY",
+                knowledge_status="PENDING",
                 state="active",
                 stable_since_at=now,
                 entry_method=entry_method,
@@ -639,7 +640,11 @@ class ManagedDocumentService:
             document.last_seen_at = now
             document.stable_since_at = now
             document.local_status = "READY"
-            document.delivery_status = "PENDING"
+            document.delivery_status = "LOCAL_ONLY"
+            document.knowledge_status = "PENDING"
+            document.indexed_content_hash = None
+            document.indexed_chunk_count = 0
+            document.knowledge_error = None
             document.deletion_requested = False
             document.deleted_at = None
             document.state = "active"
@@ -648,7 +653,6 @@ class ManagedDocumentService:
             event_type = "document.changed"
         await self._session.commit()
         await self._session.refresh(document)
-        await self._queue(document, "UPSERT", path)
         await self._operations.record_event(
             event_type,
             f"Document {document.filename} was {'changed' if changed else 'discovered'}",
@@ -931,10 +935,10 @@ class ManagedDocumentService:
         document.deletion_requested = True
         document.deleted_at = datetime.now(UTC)
         document.local_status = "DELETED"
-        document.delivery_status = "PENDING_DELETE"
+        document.delivery_status = "LOCAL_ONLY"
+        document.knowledge_status = "DELETE_PENDING"
         document.state = "missing"
         await self._session.commit()
-        await self._queue(document, "DELETE", None)
         source = await self.source()
         source.file_count = int(
             await self._session.scalar(
@@ -962,38 +966,24 @@ class ManagedDocumentService:
             component="documents",
         )
 
-    async def retry(self, document_id: UUID) -> DocumentDeliveryJobModel:
+    async def retry(self, document_id: UUID) -> DocumentModel:
         document = await self.get(document_id)
-        job = await self._session.scalar(
-            select(DocumentDeliveryJobModel)
-            .where(DocumentDeliveryJobModel.document_id == document.id)
-            .order_by(DocumentDeliveryJobModel.created_at.desc())
-        )
-        if job is None or job.state not in {"FAILED_RETRYABLE", "FAILED_PERMANENT"}:
+        if document.knowledge_status != "FAILED":
             raise DocumentError(
-                "UPLOAD_ALREADY_IN_PROGRESS", "No failed delivery is available to retry.", 409
+                "INDEX_ALREADY_IN_PROGRESS", "No failed local indexing is available to retry.", 409
             )
-        if job.error_code == "PEKA_VALIDATION_REJECTED":
-            raise DocumentError(
-                "PEKA_VALIDATION_REJECTED",
-                "PEKA rejected this document; correct the file before retrying.",
-                409,
-            )
-        job.state = "PENDING"
-        job.next_retry_at = datetime.now(UTC)
-        job.error_code = None
-        job.error_message = None
-        document.delivery_status = "QUEUED" if job.operation == "UPSERT" else "PENDING_DELETE"
-        document.local_status = "QUEUED" if job.operation == "UPSERT" else "DELETED"
+        document.knowledge_status = "PENDING"
+        document.knowledge_error = None
+        document.local_status = "READY"
         await self._session.commit()
         await self._operations.record_event(
             "document.retry_requested",
-            f"Delivery retry was requested for document {document.filename}",
+            f"Local indexing retry was requested for document {document.filename}",
             target_type="document",
             target_id=str(document.id),
-            component="document_delivery",
+            component="local_knowledge",
         )
-        return job
+        return document
 
 
 class DocumentDeliveryWorker:

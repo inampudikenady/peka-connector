@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -9,6 +9,7 @@ from app.core.logging import sanitize
 from app.domain.entities.source import UserAccount
 from app.domain.services.connector_status import derive_connection_state
 from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
+from app.infrastructure.database.models.integration import ConnectorIntegrationModel
 from app.infrastructure.database.models.operations import (
     ApplicationLogModel,
     AuditEventModel,
@@ -20,6 +21,10 @@ from app.infrastructure.database.models.source import SourceModel
 class SqlAlchemyOperationsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    @property
+    def session(self) -> AsyncSession:
+        return self._session
 
     async def record_event(
         self,
@@ -55,17 +60,143 @@ class SqlAlchemyOperationsRepository:
         )
         await self._session.commit()
 
+    async def record_audit_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist UI/audit history without changing structured application logs."""
+        self._session.add(
+            AuditEventModel(
+                event_type=event_type,
+                target_type=target_type,
+                target_id=target_id,
+                message=str(sanitize(message))[:1000],
+                details=sanitize(details or {}),
+            )
+        )
+        await self._session.commit()
+
     async def list_activity_page(
         self, page: int, page_size: int
     ) -> tuple[list[AuditEventModel], int]:
-        total = int(await self._session.scalar(select(func.count(AuditEventModel.id))) or 0)
+        human_event = or_(
+            AuditEventModel.target_type.is_(None),
+            AuditEventModel.target_type != "operational_tool_request",
+        )
+        total = int(
+            await self._session.scalar(select(func.count(AuditEventModel.id)).where(human_event))
+            or 0
+        )
         result = await self._session.scalars(
             select(AuditEventModel)
+            .where(human_event)
             .order_by(AuditEventModel.created_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
         return list(result.all()), total
+
+    async def list_operational_requests(
+        self, page: int, page_size: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        events = list(
+            (
+                await self._session.scalars(
+                    select(AuditEventModel)
+                    .where(AuditEventModel.target_type == "operational_tool_request")
+                    .order_by(AuditEventModel.created_at.desc())
+                    .limit(5000)
+                )
+            ).all()
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for event in reversed(events):
+            request_id = str(event.target_id or "")
+            if not request_id:
+                continue
+            details = event.details or {}
+            current = grouped.setdefault(
+                request_id,
+                {
+                    "request_id": request_id,
+                    "requested_at": event.created_at,
+                    "completed_at": None,
+                    "tool_name": str(details.get("tool_name") or "unknown"),
+                    "integration": str(details.get("integration") or "Connector"),
+                    "target_asset": details.get("target_asset"),
+                    "status": "running",
+                    "duration_ms": None,
+                    "result_summary": None,
+                    "error_code": None,
+                },
+            )
+            if event.event_type == "operational_request.started":
+                current["requested_at"] = event.created_at
+                current["status"] = "running"
+            elif event.event_type in {
+                "operational_request.succeeded",
+                "operational_request.failed",
+            }:
+                current.update(
+                    {
+                        "completed_at": event.created_at,
+                        "status": "succeeded"
+                        if event.event_type.endswith("succeeded")
+                        else "failed",
+                        "duration_ms": details.get("duration_ms"),
+                        "result_summary": details.get("result_summary"),
+                        "error_code": details.get("error_code"),
+                    }
+                )
+        rows = sorted(grouped.values(), key=lambda item: item["requested_at"], reverse=True)
+        start = (page - 1) * page_size
+        return rows[start : start + page_size], len(rows)
+
+    async def activity_overview(self) -> dict[str, Any]:
+        requests, _ = await self.list_operational_requests(1, 5000)
+        now = datetime.now(UTC)
+        warning_events = list(
+            (
+                await self._session.scalars(
+                    select(AuditEventModel)
+                    .where(
+                        or_(
+                            AuditEventModel.event_type.contains("failed"),
+                            AuditEventModel.event_type.contains("warning"),
+                            AuditEventModel.event_type.contains("deferred"),
+                        )
+                    )
+                    .order_by(AuditEventModel.created_at.desc())
+                    .limit(5)
+                )
+            ).all()
+        )
+        last_sync = await self._session.scalar(
+            select(func.max(AuditEventModel.created_at)).where(
+                AuditEventModel.event_type.contains("sync"),
+                AuditEventModel.event_type.contains("completed"),
+            )
+        )
+        settings = await self.get_settings()
+        return {
+            "pending_requests": sum(item["status"] == "pending" for item in requests),
+            "running_requests": sum(item["status"] == "running" for item in requests),
+            "failed_requests": sum(item["status"] == "failed" for item in requests),
+            "successful_requests_24h": sum(
+                item["status"] == "succeeded"
+                and item["completed_at"] is not None
+                and item["completed_at"] >= now - timedelta(hours=24)
+                for item in requests
+            ),
+            "recent_warnings_or_failures": warning_events,
+            "last_heartbeat_at": settings.last_heartbeat_at,
+            "last_completed_sync_at": last_sync,
+        }
 
     async def list_logs(
         self,
@@ -310,6 +441,16 @@ class SqlAlchemyOperationsRepository:
         recent_events = await self._session.scalars(
             select(AuditEventModel).order_by(AuditEventModel.created_at.desc()).limit(12)
         )
+        integrations = list((await self._session.scalars(select(ConnectorIntegrationModel))).all())
+        recent_integration_failures = await self._session.scalars(
+            select(AuditEventModel)
+            .where(
+                AuditEventModel.target_type == "integration",
+                AuditEventModel.event_type.contains("failed"),
+            )
+            .order_by(AuditEventModel.created_at.desc())
+            .limit(5)
+        )
         managed_source = await self._session.scalar(
             select(SourceModel).where(SourceModel.system_managed.is_(True)).limit(1)
         )
@@ -347,6 +488,15 @@ class SqlAlchemyOperationsRepository:
             "enabled_source_count": enabled_count,
             "unhealthy_source_count": unhealthy_count,
             "recent_events": list(recent_events.all()),
+            "enabled_integration_count": sum(item.enabled for item in integrations),
+            "healthy_integration_count": sum(
+                item.enabled and item.status == "healthy" for item in integrations
+            ),
+            "attention_integration_count": sum(
+                item.enabled and item.status not in {"healthy", "configured"}
+                for item in integrations
+            ),
+            "recent_integration_failures": list(recent_integration_failures.all()),
             "document_total": len(documents),
             "document_queued": sum(
                 item.delivery_status in {"PENDING", "QUEUED", "PENDING_DELETE"}

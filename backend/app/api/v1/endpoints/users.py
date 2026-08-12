@@ -25,7 +25,9 @@ async def create_user(
     service: UserServiceDep,
     operations: OperationsDep,
 ) -> object:
-    user = await service.create_user(request.username, request.password, request.role)
+    user = await service.create_user(
+        request.username, request.password, request.role, request.enabled
+    )
     await operations.record_event(
         "user.created",
         f"User {user.username} created with role {user.role}",
@@ -45,7 +47,7 @@ async def set_user_state(
     service: UserServiceDep,
     operations: OperationsDep,
 ) -> object:
-    user = await service.set_active(user_id, request.enabled)
+    user = await service.set_active(user_id, request.enabled, actor.id)
     action = "enabled" if request.enabled else "disabled"
     await operations.record_event(
         f"user.{action}",

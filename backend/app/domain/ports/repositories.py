@@ -19,7 +19,11 @@ class UserRepository(Protocol):
     async def list(self) -> Sequence[UserAccount]: ...
 
     async def create(
-        self, username: str, password_hash: str, role: str = "administrator"
+        self,
+        username: str,
+        password_hash: str,
+        role: str = "administrator",
+        active: bool = True,
     ) -> UserAccount: ...
 
     async def update_password(self, user_id: UUID, password_hash: str) -> None: ...

@@ -67,6 +67,9 @@ class ProductSettingsModel(Base):
     heartbeat_job_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     heartbeat_round_trip_ms: Mapped[float | None] = mapped_column(Float, default=None)
     last_saas_server_time: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_successful_knowledge_search_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), default=None
+    )
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )

@@ -1,45 +1,70 @@
-import { Alert, Button, Card, CardContent, Grid, Paper, Stack, Typography } from '@mui/material';
-import { useEffect, useState, type ReactNode } from 'react';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import {
+  Alert, Box, Button, CircularProgress, Chip, Paper, Stack, Table, TableBody,
+  TableCell, TableContainer, TableHead, TableRow, Typography,
+} from '@mui/material';
+import { useNavigate } from 'react-router-dom';
+import type { KnowledgeStoreOverview } from '../api/types';
 
-import { api } from '../api/client';
-import type { Overview } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { ConnectionStatusBadge } from '../components/ConnectionStatusBadge';
+import { useConnectorStatus } from '../components/ConnectorStatusContext';
 import { LoadingState } from '../components/LoadingState';
-import { useToast } from '../components/ToastProvider';
 import { activityEventLabel, safeActivitySummary } from '../utils/activity';
 import { timestampDisplay } from '../utils/time';
 
-const bytes = (value: number | null) => value === null ? 'Unavailable' : `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
-
-function RelativeTime({ value, empty = 'Never' }: { value: string | null; empty?: string }) {
-  const display = timestampDisplay(value, Date.now(), empty);
-  return <span>{display.relative}{display.valid && <><br /><Typography component="span" variant="caption" color="text.secondary">{display.absolute}</Typography></>}</span>;
+function relative(value: string | null) {
+  return value ? timestampDisplay(value, Date.now(), 'Never').relative : 'Never';
 }
 
-function Fact({ label, children, mono = false }: { label: string; children: ReactNode; mono?: boolean }) {
-  return <div><Typography variant="caption" color="text.secondary">{label}</Typography><Typography sx={{ overflowWrap: 'anywhere', fontFamily: mono ? 'monospace' : undefined }}>{children}</Typography></div>;
+function SummaryValue({ label, value }: { label: string; value: number | string }) {
+  return <Paper variant="outlined" sx={{ flex: '1 1 150px', minWidth: 0, px: 2, py: 1.5 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5">{value}</Typography></Paper>;
+}
+
+export function KnowledgeStoreCard({ store }: { store: KnowledgeStoreOverview }) {
+  const status = store.status.charAt(0).toUpperCase() + store.status.slice(1);
+  const color = store.status === 'healthy' ? 'success' : store.status === 'degraded' ? 'warning' : 'error';
+  const facts: Array<[string, string]> = [
+    ['Engine', `Qdrant ${store.engine_version ?? 'Unknown'}`],
+    ['Collection', store.collection],
+    ['Documents', store.documents.toLocaleString()],
+    ['Chunks', store.chunks.toLocaleString()],
+    ['Pending', store.pending.toLocaleString()],
+    ['Failed', store.failed.toLocaleString()],
+  ];
+  return <Paper variant="outlined" sx={{ flex: '1.8 1 340px', minWidth: 0, px: 2, py: 1.5 }}>
+    <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1.25}>
+      <Typography variant="caption" color="text.secondary">Local Knowledge Store</Typography>
+      <Chip size="small" color={color} label={status} />
+    </Stack>
+    <Box sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 2, rowGap: 0.5 }}>
+      {facts.map(([name, value]) => <Box key={name} sx={{ display: 'contents' }}><Typography variant="caption" color="text.secondary">{name}</Typography><Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{value}</Typography></Box>)}
+    </Box>
+    <Box sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 2, rowGap: 0.5, mt: 1.25 }}>
+      <Typography variant="caption" color="text.secondary">Last indexed</Typography>
+      <Typography variant="caption" color="text.secondary">{relative(store.last_indexed_at)}</Typography>
+      <Typography variant="caption" color="text.secondary">Last search</Typography>
+      <Typography variant="caption" color="text.secondary">{relative(store.last_search_at)}</Typography>
+    </Box>
+  </Paper>;
 }
 
 export function OverviewPage() {
-  const { user } = useAuth(); const toast = useToast();
-  const [data, setData] = useState<Overview | null>(null);
-  const [error, setError] = useState(''); const [retrying, setRetrying] = useState(false);
-  const load = () => api.overview().then(setData);
-  useEffect(() => { void api.overview().then(setData).catch((e: Error) => setError(e.message)); }, []);
-  const retry = async () => { setRetrying(true); try { await api.retryHeartbeat(); await load(); toast.show('Heartbeat attempt completed', 'success'); } catch (e) { toast.show(e instanceof Error ? e.message : 'Heartbeat retry failed', 'error'); } finally { setRetrying(false); } };
-  if (error) return <Alert severity="error">{error}</Alert>;
-  if (!data) return <LoadingState label="Loading connector status" />;
-  return <Stack spacing={3}>
-    <div><Typography variant="h4" fontWeight={700}>Overview</Typography><Typography color="text.secondary">Current appliance operational state</Typography></div>
-    <Grid container spacing={2}>{([
-      ['Connector Name', data.connector_display_name], ['Connector Version', data.connector_version], ['Instance ID', data.instance_id],
-    ] as Array<[string, string]>).map(([label, value]) => <Grid key={label} size={{ xs: 12, md: 4 }}><Card variant="outlined"><CardContent><Fact label={label} mono={label === 'Instance ID'}>{value}</Fact></CardContent></Card></Grid>)}</Grid>
-    <Paper variant="outlined" sx={{ p: 3 }}><Stack spacing={2}><Stack direction="row" justifyContent="space-between" alignItems="center"><Typography variant="h6">PEKA Registration</Typography><Stack direction="row" spacing={1} alignItems="center"><ConnectionStatusBadge status={data.saas_status} />{user?.role === 'administrator' && data.saas_status !== 'unregistered' && <Button size="small" disabled={retrying} onClick={() => void retry()}>Retry Now</Button>}</Stack></Stack><Alert severity="info">Connected means the connector is communicating with PEKA. It does not mean source data has been uploaded or synchronized.</Alert><Grid container spacing={2}><Grid size={{ xs: 12, md: 6 }}><Fact label="PEKA URL">{data.saas_url ?? 'Not configured'}</Fact></Grid><Grid size={{ xs: 12, md: 6 }}><Fact label="Registered At"><RelativeTime value={data.registered_at} /></Fact></Grid><Grid size={{ xs: 12, md: 6 }}><Fact label="Tenant ID" mono>{data.tenant_id ?? 'Not assigned'}</Fact></Grid><Grid size={{ xs: 12, md: 6 }}><Fact label="Connector ID" mono>{data.connector_id ?? 'Not assigned'}</Fact></Grid></Grid></Stack></Paper>
-    <Paper variant="outlined" sx={{ p: 3 }}><Typography variant="h6" gutterBottom>Heartbeat</Typography>{data.last_heartbeat_error && <Alert severity="warning" sx={{ mb: 2 }}><strong>Latest failure:</strong> {data.last_heartbeat_error}</Alert>}<Grid container spacing={2}><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Last Successful Heartbeat"><RelativeTime value={data.last_heartbeat_at} /></Fact></Grid><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Last Heartbeat Attempt"><RelativeTime value={data.last_heartbeat_attempt_at} /></Fact></Grid><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Next Heartbeat"><RelativeTime value={data.next_heartbeat_at} empty="Not scheduled" /></Fact></Grid><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Heartbeat Interval">{data.heartbeat_interval_seconds} seconds</Fact></Grid><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Consecutive Failures">{data.heartbeat_failure_count}</Fact></Grid><Grid size={{ xs: 12, sm: 6, lg: 4 }}><Fact label="Round-Trip Latency">{data.heartbeat_round_trip_ms === null ? 'Unavailable' : `${data.heartbeat_round_trip_ms.toFixed(1)} ms`}</Fact></Grid></Grid></Paper>
-    <Paper variant="outlined" sx={{ p: 3 }}><Typography variant="h6" gutterBottom>Operations</Typography><Grid container spacing={2}><Grid size={{ xs: 12, md: 4 }}><Fact label="Document source">{data.document_source_health.charAt(0).toUpperCase() + data.document_source_health.slice(1)}</Fact></Grid><Grid size={{ xs: 12, md: 4 }}><Fact label="Local Storage">{bytes(data.storage_free_bytes)} free of {bytes(data.storage_total_bytes)}</Fact></Grid><Grid size={{ xs: 12, md: 4 }}><Fact label="Scheduler">{data.scheduler_running ? `Running${data.heartbeat_job_scheduled ? ', heartbeat scheduled' : ''}` : 'Stopped'}</Fact></Grid><Grid size={{ xs: 12, md: 4 }}><Fact label="Last document scan"><RelativeTime value={data.document_source_last_scan_at} /></Fact></Grid><Grid size={{ xs: 12, md: 4 }}><Fact label="Next document scan"><RelativeTime value={data.document_source_next_scan_at} empty="Not scheduled" /></Fact></Grid></Grid></Paper>
-    <Paper variant="outlined" sx={{ p: 3 }}><Typography variant="h6" gutterBottom>Document Delivery</Typography><Grid container spacing={2}><Grid size={{ xs: 6, md: 2 }}><Fact label="Total">{data.document_total}</Fact></Grid><Grid size={{ xs: 6, md: 2 }}><Fact label="Queued">{data.document_queued}</Fact></Grid><Grid size={{ xs: 6, md: 2 }}><Fact label="Uploading">{data.document_uploading}</Fact></Grid><Grid size={{ xs: 6, md: 2 }}><Fact label="Uploaded">{data.document_uploaded}</Fact></Grid><Grid size={{ xs: 6, md: 2 }}><Fact label="Failed">{data.document_failed}</Fact></Grid><Grid size={{ xs: 6, md: 2 }}><Fact label="Unsupported">{data.document_unsupported}</Fact></Grid><Grid size={{ xs: 12, md: 6 }}><Fact label="Last successful delivery"><RelativeTime value={data.last_document_delivery_at} /></Fact></Grid><Grid size={{ xs: 12, md: 6 }}><Fact label="PEKA document endpoint">{data.document_endpoint_status}</Fact></Grid></Grid></Paper>
-    {data.unhealthy_source_count > 0 && <Alert severity="warning">{data.unhealthy_source_count} enabled source(s) require attention.</Alert>}
-    <div><Typography variant="h6" gutterBottom>Recent Events</Typography>{data.recent_events.length === 0 ? <Alert severity="info">No connector events have been recorded.</Alert> : <Stack spacing={1}>{data.recent_events.map((event) => <Card variant="outlined" key={event.id}><CardContent><Typography variant="overline" color="text.secondary">{activityEventLabel(event.event_type)}</Typography><Typography>{safeActivitySummary(event.message)}</Typography><Typography variant="caption" color="text.secondary"><RelativeTime value={event.created_at} /></Typography></CardContent></Card>)}</Stack>}</div>
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const { data, error, loading, retrying, retryHeartbeat } = useConnectorStatus();
+  if (loading && !data) return <LoadingState label="Loading connector overview" />;
+  if (!data) return <Alert severity="error">{error || 'Connector status could not be loaded.'}</Alert>;
+  return <Stack spacing={2.5}>
+    <Box><Typography variant="h4">Overview</Typography><Typography variant="body2" color="text.secondary">Connector connectivity and integration readiness.</Typography></Box>
+    {error && <Alert severity="error">{error}</Alert>}
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ md: 'center' }} spacing={2}>
+        <Box sx={{ flex: 1 }}><Typography variant="overline" color="text.secondary">Connector connectivity</Typography><Typography variant="h6">{data.connector_display_name}</Typography><Typography variant="body2" color="text.secondary">Version {data.connector_version} · {data.connector_status}</Typography><Typography variant="body2" color="text.secondary">Last successful heartbeat: {relative(data.last_heartbeat_at)}</Typography></Box>
+        <Stack direction="row" alignItems="center" spacing={1.5}><ConnectionStatusBadge status={data.saas_status} />{user?.role === 'administrator' && <Button variant="outlined" size="small" startIcon={retrying ? <CircularProgress size={16} /> : <RefreshIcon />} disabled={retrying || !data.connector_id} onClick={() => void retryHeartbeat().catch(() => undefined)}>{retrying ? 'Retrying…' : 'Retry heartbeat'}</Button>}</Stack>
+      </Stack>
+    </Paper>
+    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5 }}><KnowledgeStoreCard store={data.knowledge_store} /><SummaryValue label="Enabled integrations" value={data.enabled_integration_count} /><SummaryValue label="Healthy integrations" value={data.healthy_integration_count} /><SummaryValue label="Need attention" value={data.attention_integration_count} /></Box>
+    <Box><Typography variant="h6" mb={1}>Recent integration failures</Typography>{data.recent_integration_failures.length === 0 ? <Paper variant="outlined" sx={{ px: 2, py: 1.5 }}><Typography variant="body2" color="text.secondary">No recent integration failures.</Typography></Paper> : <TableContainer component={Paper} variant="outlined"><Table size="small"><TableHead><TableRow><TableCell>Integration</TableCell><TableCell>Failure</TableCell><TableCell>Time</TableCell><TableCell>Status</TableCell><TableCell align="right" /></TableRow></TableHead><TableBody>{data.recent_integration_failures.map((event) => <TableRow key={event.id}><TableCell>{event.integration ?? 'Connector'}</TableCell><TableCell><Typography variant="body2" fontWeight={650}>{activityEventLabel(event.event_type)}</Typography><Typography variant="caption" color="text.secondary">{safeActivitySummary(event.message)}</Typography></TableCell><TableCell>{relative(event.created_at)}</TableCell><TableCell><Chip size="small" color="error" label="Failed" /></TableCell><TableCell align="right"><Button size="small" variant="text" onClick={() => navigate('/activity?tab=events')}>View details</Button></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</Box>
   </Stack>;
 }

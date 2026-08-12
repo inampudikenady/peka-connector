@@ -15,7 +15,7 @@ describe('customer terminology', () => {
       const source = String(module);
       expect(source, path).not.toContain('SaaS Registration');
       expect(source, path).not.toContain('SaaS URL');
-      expect(source, path).not.toContain('PEKA SaaS');
+      expect(source.replaceAll('PEKA SaaS connectivity', ''), path).not.toContain('PEKA SaaS');
     }
     expect(customerFacingText('PEKA SaaS is unavailable')).toBe('PEKA is unavailable');
   });

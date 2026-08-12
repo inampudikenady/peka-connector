@@ -55,8 +55,9 @@ describe('Activity page', () => {
     expect(india.absolute).not.toBe(california.absolute);
   });
 
-  it('keeps Activity and Logs as separate navigation features', () => {
+  it('consolidates requests and logs under Activity navigation', () => {
     expect(navigationItems.find((item) => item.label === 'Activity')?.path).toBe('/activity');
-    expect(navigationItems.find((item) => item.label === 'Logs')?.path).toBe('/logs');
+    expect(navigationItems.some((item) => item.label === 'Operational Requests')).toBe(false);
+    expect(navigationItems.some((item) => item.label === 'Logs')).toBe(false);
   });
 });

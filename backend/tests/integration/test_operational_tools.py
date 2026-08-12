@@ -1,15 +1,18 @@
+import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+import httpx
 import pytest
 
+from app.application.services.knowledge import KnowledgeSearchResult
 from app.application.services.operational_tools import (
     OperationalToolExecutor,
     _health_assessment,
 )
 from app.core.config import get_settings
-from app.domain.ports.saas import OperationalToolRequest
+from app.domain.ports.saas import OperationalToolRequest, OperationalToolResult
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.models.inventory import (
     InventoryAssetModel,
@@ -17,6 +20,7 @@ from app.infrastructure.database.models.inventory import (
     PrometheusConfigurationModel,
 )
 from app.infrastructure.database.session import engine, session_factory
+from app.infrastructure.saas.client import HttpxPEKASaaSClient
 from app.infrastructure.security.secrets import SecretEncryptionService
 
 
@@ -34,6 +38,88 @@ def _request(tool_name: str, arguments: dict) -> OperationalToolRequest:
         expires_at=datetime.now(UTC) + timedelta(seconds=30),
         claim_token="claim-token-that-is-long-enough",
     )
+
+
+@pytest.mark.asyncio
+async def test_knowledge_result_survives_executor_and_saas_submission(monkeypatch):
+    await _reset_database()
+    document_id = uuid4()
+    chunk_id = uuid4()
+    version_id = uuid4()
+    async with session_factory() as session:
+        executor = OperationalToolExecutor(
+            session,
+            get_settings(),
+            SecretEncryptionService(get_settings().encryption_key),
+        )
+
+        async def search(_query, _top_k, _document_id):
+            return [
+                KnowledgeSearchResult(
+                    document_id=document_id,
+                    chunk_id=chunk_id,
+                    content="device (hd0) /dev/sdb\nroot (hd0,1)\nsetup (hd0)",
+                    score=0.87,
+                    source="Documents",
+                    metadata={
+                        "filename": "boot_disk_migration.txt",
+                        "chunk_index": 1,
+                        "version_id": str(version_id),
+                        "vector_score": 0.30048972,
+                    },
+                )
+            ]
+
+        monkeypatch.setattr(executor.knowledge, "search", search)
+        result = await executor.execute(
+            _request(
+                "knowledge_search",
+                {
+                    "query": (
+                        "What GRUB commands should I use after creating /dev/sdb2 "
+                        "for the new boot partition?"
+                    ),
+                    "top_k": 5,
+                },
+            )
+        )
+
+    submitted = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal submitted
+        submitted = json.loads(request.content)
+        return httpx.Response(204)
+
+    client = HttpxPEKASaaSClient(
+        5,
+        15,
+        transport=httpx.MockTransport(handler),
+    )
+    request_id = uuid4()
+    await client.submit_operational_tool_result(
+        "https://peka.example.test",
+        uuid4(),
+        "connector-secret",
+        request_id,
+        OperationalToolResult(
+            claim_token="claim-token-that-is-long-enough",
+            status="completed",
+            result=result,
+        ),
+    )
+
+    evidence = submitted["result"]["results"][0]
+    assert evidence["document_id"] == str(document_id)
+    assert evidence["chunk_id"] == str(chunk_id)
+    assert evidence["score"] == 0.87
+    assert "device (hd0) /dev/sdb" in evidence["content"]
+    assert evidence["metadata"] == {
+        "filename": "boot_disk_migration.txt",
+        "chunk_index": 1,
+        "version_id": str(version_id),
+        "vector_score": 0.30048972,
+    }
 
 
 @pytest.mark.asyncio

@@ -226,8 +226,7 @@ def score_ticket_relevance(
             phrase
             for phrase in required_anchors
             if any(
-                _contains(field, phrase)
-                for field in (title_text, description, articles, tag_text)
+                _contains(field, phrase) for field in (title_text, description, articles, tag_text)
             )
         ]
         if not anchor_matches:

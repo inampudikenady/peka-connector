@@ -25,7 +25,7 @@
 
 ## Later source plugins
 
-Prometheus, Loki, Zammad, ServiceNow, SharePoint, Confluence, and Jira will be added only with real contracts, permissions guidance, health checks, secret handling, and tests. They will not appear in the UI before completion.
+Prometheus, Loki, Zammad, and ServiceNow have dedicated contracts, permissions guidance, health checks, secret handling, and tests. Future SharePoint, Confluence, and Jira integrations will not appear in the UI before equivalent implementation and validation are complete.
 
 ## Enterprise hardening
 

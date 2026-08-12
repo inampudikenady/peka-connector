@@ -1,8 +1,11 @@
 import type {
   CurrentUser, Diagnostics, Health, LocalUser, LoginResponse, Overview, PaginatedActivity,
+  ActivityOverview, PaginatedOperationalRequests,
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
   CMDBDataset, CMDBImportMode, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
   LokiConfiguration, PrometheusDiagnostics, TrustedCertificateAuthority, ZammadConfiguration,
+  ConnectorIntegration, IntegrationCatalogItem,
+  ServiceNowConfiguration,
 } from './types';
 
 let accessToken: string | null = null;
@@ -22,6 +25,10 @@ async function parseError(response: Response): Promise<ApiError> {
   const body = (await response.json().catch(() => ({}))) as { detail?: unknown; code?: unknown };
   let message = 'Request failed';
   if (typeof body.detail === 'string') message = body.detail;
+  if (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
+    const detail = body.detail as { message?: unknown; code?: unknown };
+    if (typeof detail.message === 'string') message = detail.message;
+  }
   if (Array.isArray(body.detail)) {
     message = body.detail.map((item) => (item as { msg?: string }).msg ?? 'Invalid value').join('. ');
   }
@@ -100,6 +107,8 @@ export const api = {
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword }) }),
   overview: (): Promise<Overview> => request('/overview'),
   activity: (page = 1): Promise<PaginatedActivity> => request(`/activity?page=${page}&page_size=25`),
+  activityOverview: (): Promise<ActivityOverview> => request('/activity/overview'),
+  operationalRequests: (page = 1): Promise<PaginatedOperationalRequests> => request(`/operational-requests?page=${page}&page_size=25`),
   logs: (query: string): Promise<PaginatedLogs> => request(`/logs?${query}`),
   downloadLogs: (): Promise<void> => download('/logs/download', 'peka-connector-logs.jsonl'),
   diagnostics: (): Promise<Diagnostics> => request('/diagnostics'),
@@ -189,6 +198,20 @@ export const api = {
   updateZammadConfiguration: (id: string, body: object): Promise<ZammadConfiguration> => request(`/zammad/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   testZammad: (id: string): Promise<{ message: string; readable_ticket_count: number }> => request(`/zammad/configurations/${id}/test`, { method: 'POST' }),
   syncZammad: (id: string): Promise<{ ticket_count: number; article_count: number; duration_seconds: number }> => request(`/zammad/configurations/${id}/sync`, { method: 'POST' }),
+  serviceNowConfigurations: (): Promise<ServiceNowConfiguration[]> => request('/servicenow/configurations'),
+  createServiceNowConfiguration: (body: object): Promise<ServiceNowConfiguration> => request('/servicenow/configurations', { method: 'POST', body: JSON.stringify(body) }),
+  updateServiceNowConfiguration: (id: string, body: object): Promise<ServiceNowConfiguration> => request(`/servicenow/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  testServiceNow: (id: string): Promise<{ message: string; readable_configuration_item_count: number }> => request(`/servicenow/configurations/${id}/test`, { method: 'POST' }),
+  syncServiceNow: (id: string): Promise<{ counts: Record<string, number>; stage_errors: Record<string, string> }> => request(`/servicenow/configurations/${id}/sync`, { method: 'POST' }),
+  integrationCatalog: (): Promise<IntegrationCatalogItem[]> => request('/integrations/catalog'),
+  integrations: (): Promise<ConnectorIntegration[]> => request('/integrations'),
+  integration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}`),
+  createIntegration: (body: object): Promise<ConnectorIntegration> => request('/integrations', { method: 'POST', body: JSON.stringify(body) }),
+  updateIntegration: (id: string, body: object): Promise<ConnectorIntegration> => request(`/integrations/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  testIntegration: (id: string): Promise<Record<string, unknown>> => request(`/integrations/${id}/test`, { method: 'POST' }),
+  enableIntegration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}/enable`, { method: 'POST' }),
+  disableIntegration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}/disable`, { method: 'POST' }),
+  syncIntegration: (id: string): Promise<Record<string, unknown>> => request(`/integrations/${id}/sync`, { method: 'POST' }),
   inventory: (query: string): Promise<PaginatedInventory> => request(`/inventory?${query}`),
   inventoryDetail: (id: string): Promise<InventoryDetail> => request(`/inventory/${id}`),
   decideCorrelation: (observationId: string, assetId: string | null, status: string): Promise<void> =>

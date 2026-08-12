@@ -65,6 +65,7 @@ class UserCreateRequest(BaseModel):
     password: str
     confirm_password: str
     role: Role
+    enabled: bool = True
 
     @field_validator("username")
     @classmethod
@@ -184,6 +185,9 @@ class ManagedDocumentResponse(BaseModel):
     state: str
     local_status: str
     delivery_status: str
+    knowledge_status: str
+    indexed_chunk_count: int
+    knowledge_error: str | None
     upload_attempt_count: int
     last_upload_attempt_at: datetime | None
     uploaded_at: datetime | None
@@ -292,6 +296,7 @@ class ActivityResponse(BaseModel):
     message: str
     created_at: datetime
     outcome: Literal["success", "warning", "failure", "information"]
+    integration: str | None = None
 
 
 class PaginatedActivityResponse(BaseModel):
@@ -299,6 +304,36 @@ class PaginatedActivityResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class OperationalRequestResponse(BaseModel):
+    request_id: UUID
+    requested_at: datetime
+    completed_at: datetime | None
+    tool_name: str
+    integration: str
+    target_asset: str | None
+    status: Literal["pending", "running", "succeeded", "failed", "expired", "cancelled"]
+    duration_ms: float | None
+    result_summary: str | None
+    error_code: str | None
+
+
+class PaginatedOperationalRequestsResponse(BaseModel):
+    items: list[OperationalRequestResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class ActivityOverviewResponse(BaseModel):
+    pending_requests: int
+    running_requests: int
+    failed_requests: int
+    successful_requests_24h: int
+    recent_warnings_or_failures: list[ActivityResponse]
+    last_heartbeat_at: datetime | None
+    last_completed_sync_at: datetime | None
 
 
 class LogResponse(BaseModel):
@@ -352,15 +387,44 @@ class ProductSettingsUpdate(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
+class KnowledgeStoreChecksResponse(BaseModel):
+    qdrant_reachable: bool
+    collection_exists: bool
+    collection_accessible: bool
+    statistics_readable: bool
+    search_service_operational: bool
+
+
+class KnowledgeStoreOverviewResponse(BaseModel):
+    status: Literal["healthy", "degraded", "unavailable"]
+    engine: Literal["qdrant"] = "qdrant"
+    engine_version: str | None = None
+    collection: str
+    documents: int
+    chunks: int
+    pending: int
+    failed: int
+    last_indexed_at: datetime | None = None
+    last_search_at: datetime | None = None
+    checks: KnowledgeStoreChecksResponse
+
+
 class OverviewResponse(BaseModel):
     connector_status: str
     saas_status: str
     last_heartbeat_at: datetime | None
     connector_version: str
+    peka_connector: str
+    components: dict[str, str]
+    knowledge_store: KnowledgeStoreOverviewResponse
     source_count: int
     enabled_source_count: int
     unhealthy_source_count: int
     recent_events: list[ActivityResponse]
+    enabled_integration_count: int
+    healthy_integration_count: int
+    attention_integration_count: int
+    recent_integration_failures: list[ActivityResponse]
     storage_total_bytes: int | None
     storage_free_bytes: int | None
     connector_display_name: str
@@ -444,6 +508,57 @@ class DiagnosticsResponse(BaseModel):
     stale_document_jobs: int
 
 
+class ComponentHealth(BaseModel):
+    status: Literal["healthy", "degraded", "unavailable"]
+
+
 class HealthResponse(BaseModel):
-    status: Literal["healthy"] = "healthy"
+    status: Literal["healthy", "degraded"] = "healthy"
     version: str
+    components: dict[str, ComponentHealth]
+
+
+class ComponentVersionResponse(BaseModel):
+    peka_connector: str
+    components: dict[str, str]
+
+
+class KnowledgeSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+    document_id: UUID | None = None
+
+
+class KnowledgeSearchResultResponse(BaseModel):
+    document_id: UUID
+    chunk_id: UUID
+    content: str
+    score: float
+    source: str
+    metadata: dict[str, Any]
+
+
+class KnowledgeSearchResponse(BaseModel):
+    results: list[KnowledgeSearchResultResponse]
+
+
+class KnowledgeStatsResponse(BaseModel):
+    status: Literal["healthy", "degraded", "unavailable"]
+    document_count: int
+    indexed_chunk_count: int
+    pending_count: int = 0
+    failed_count: int = 0
+    last_index_activity: datetime | None = None
+    qdrant_reachable: bool
+    collection_available: bool
+    documents_stored: bool
+    vectors_stored: bool
+    search_operational: bool
+    last_search_success: bool | None = None
+    last_search_at: datetime | None = None
+    engine: Literal["qdrant"] = "qdrant"
+    engine_version: str | None = None
+    collection: str
+    statistics_readable: bool

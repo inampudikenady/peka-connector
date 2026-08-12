@@ -7,7 +7,8 @@ from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from app.core.config import Settings
+from app.application.services.knowledge import LocalKnowledgeService
+from app.core.config import Settings, get_settings
 from app.core.version import CONNECTOR_VERSION
 from app.domain.entities.source import UserAccount
 from app.domain.ports.saas import (
@@ -15,6 +16,7 @@ from app.domain.ports.saas import (
     ConnectorHeartbeatRequest,
     ConnectorRegistrationRequest,
     ConnectorRegistrationResponse,
+    LocalKnowledgeStoreSummary,
     PEKASaaSClient,
     SaaSClientError,
     SourceHeartbeatSummary,
@@ -26,6 +28,7 @@ from app.infrastructure.security.secrets import SecretEncryptionService
 CAPABILITIES: list[ConnectorCapabilityName] = [
     "filesystem_documents",
     "operational_tools",
+    "local_knowledge",
 ]
 PROCESS_STARTED = time.monotonic()
 
@@ -247,6 +250,20 @@ class HeartbeatService:
         previous_state = settings.saas_status
         first_heartbeat = settings.last_heartbeat_at is None
         summary = SourceHeartbeatSummary(**(await self._operations.source_summary()))
+        knowledge_status = "unavailable"
+        knowledge_documents = 0
+        knowledge_chunks = 0
+        last_index_activity = None
+        try:
+            knowledge = LocalKnowledgeService(self._operations.session, get_settings())
+            if await knowledge.health_check():
+                stats = await knowledge.stats()
+                knowledge_status = "healthy"
+                knowledge_documents = stats.document_count
+                knowledge_chunks = stats.indexed_chunk_count
+                last_index_activity = stats.last_index_activity
+        except Exception:
+            knowledge_status = "degraded"
         request = ConnectorHeartbeatRequest(
             instance_id=UUID(str(settings.instance_id)),
             name=settings.connector_display_name,
@@ -257,6 +274,12 @@ class HeartbeatService:
             uptime_seconds=max(0, int(time.monotonic() - PROCESS_STARTED)),
             sources=summary,
             capabilities=CAPABILITIES,
+            local_knowledge_store=LocalKnowledgeStoreSummary(
+                status=knowledge_status,
+                documents=knowledge_documents,
+                indexed_chunks=knowledge_chunks,
+                last_index_activity=last_index_activity,
+            ),
         )
         try:
             secret = self._secrets.decrypt(settings.encrypted_connector_secret)

@@ -2,7 +2,7 @@ x-peka-build: &peka-build
   context: .
   dockerfile: Dockerfile
   args:
-    PEKA_CONNECTOR_VERSION: ${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
+    PEKA_CONNECTOR_VERSION: ${PEKA_CONNECTOR_VERSION:-1.0.2}
     PEKA_BUILD_REVISION: ${PEKA_BUILD_REVISION:-local}
     PEKA_BUILD_CREATED: ${PEKA_BUILD_CREATED:-unknown}
     PEKA_BUILD_SOURCE: ${PEKA_BUILD_SOURCE:-local}
@@ -10,7 +10,7 @@ x-peka-build: &peka-build
 services:
   volume-init:
     build: *peka-build
-    image: peka-connector:${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
+    image: peka-connector:${PEKA_CONNECTOR_VERSION:-1.0.2}
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -34,7 +34,7 @@ services:
 
   connector:
     build: *peka-build
-    image: peka-connector:${PEKA_CONNECTOR_VERSION:-0.3.0.dev0}
+    image: peka-connector:${PEKA_CONNECTOR_VERSION:-1.0.2}
     restart: unless-stopped
     environment:
       PEKA_ENVIRONMENT: production
@@ -48,9 +48,13 @@ services:
       PEKA_BOOTSTRAP_ADMIN_PASSWORD: ${PEKA_BOOTSTRAP_ADMIN_PASSWORD:-}
       PEKA_LOG_LEVEL: ${PEKA_LOG_LEVEL:-INFO}
       PEKA_EXTERNAL_SOURCES_ROOT: /data/external-sources
+      PEKA_QDRANT_URL: http://qdrant:6333
+      PEKA_QDRANT_COLLECTION: peka_documents
     depends_on:
       volume-init:
         condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
     volumes:
       - peka-data:/data
       - ${PEKA_SOURCES_PATH:-./sources}:/data/external-sources:ro
@@ -64,7 +68,28 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    restart: unless-stopped
+    volumes:
+      - peka_connector_qdrant_data:/qdrant/storage
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333;
+          printf "GET /healthz HTTP/1.0\r\n\r\n" >&3;
+          grep -q "200 OK" <&3'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   peka-data:
   connector_documents:
   connector_cmdb:
+  peka_connector_qdrant_data:
+    name: peka_connector_qdrant_data

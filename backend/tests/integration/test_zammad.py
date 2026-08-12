@@ -290,9 +290,12 @@ async def test_client_pagination_auth_permission_timeout_and_header():
         tls_verify=True,
     )
     seen_headers: list[str] = []
+    seen_search_queries: list[str] = []
 
     def pages(request: httpx.Request) -> httpx.Response:
         seen_headers.append(request.headers.get("Authorization", ""))
+        if request.url.path.endswith("/tickets/search"):
+            seen_search_queries.append(request.url.params.get("query", ""))
         page = int(request.url.params.get("page", "1"))
         return httpx.Response(
             200,
@@ -302,7 +305,14 @@ async def test_client_pagination_auth_permission_timeout_and_header():
     client = ZammadClient(configuration, "secret-token", httpx.MockTransport(pages))
     assert (await client.validate())["success"] is True
     assert len(await client.tickets(limit=200)) == 101
-    assert seen_headers == ["Token token=secret-token"] * 3
+    assert len(
+        await client.tickets(
+            updated_after=datetime(2026, 8, 5, tzinfo=UTC), limit=200
+        )
+    ) == 101
+    assert client.last_ticket_pages_fetched == 2
+    assert seen_search_queries == ["updated_at:>2026-08-05T00:00:00Z"] * 2
+    assert seen_headers == ["Token token=secret-token"] * 5
 
     for status_code, expected in ((401, "AUTHENTICATION_FAILED"), (403, "PERMISSION_DENIED")):
         failing = ZammadClient(
@@ -404,8 +414,9 @@ async def test_secure_configuration_sync_search_counts_correlation_and_reconcili
         monkeypatch.setattr(ZammadClient, "lookup_tables", lookups)
         monkeypatch.setattr(ZammadClient, "tickets", tickets)
         monkeypatch.setattr(ZammadClient, "articles", articles)
-        sync = await service.synchronize(configuration.id)
+        sync = await service.synchronize(configuration.id, full=True, trigger="manual")
         assert sync["ticket_count"] == 2 and sync["article_count"] == 4
+        cursor_before_empty = configuration.sync_cursor_at
 
         incremental_cursors: list[datetime | None] = []
 
@@ -414,9 +425,13 @@ async def test_secure_configuration_sync_search_counts_correlation_and_reconcili
             return []
 
         monkeypatch.setattr(ZammadClient, "tickets", incremental_tickets)
-        incremental = await service.synchronize(configuration.id)
+        incremental = await service.synchronize(
+            configuration.id, full=False, trigger="scheduled"
+        )
         assert incremental["ticket_count"] == 0
         assert incremental_cursors[0] is not None
+        assert incremental_cursors[0] == cursor_before_empty - timedelta(minutes=2)
+        assert configuration.sync_cursor_at == cursor_before_empty
         assert configuration.synchronized_ticket_count == 2
         assert configuration.synchronized_article_count == 4
         monkeypatch.setattr(ZammadClient, "tickets", tickets)
@@ -492,7 +507,7 @@ async def test_secure_configuration_sync_search_counts_correlation_and_reconcili
         )
         assert "10041" not in {item["number"] for item in correlation["correlations"]}
 
-        async def synchronize_without_network(_configuration_id):
+        async def synchronize_without_network(_configuration_id, **_kwargs):
             return {"ticket_count": 2, "article_count": 4}
 
         monkeypatch.setattr(service, "synchronize", synchronize_without_network)
@@ -507,7 +522,7 @@ async def test_secure_configuration_sync_search_counts_correlation_and_reconcili
         monkeypatch.setattr(ZammadClient, "lookup_tables", lookups)
         monkeypatch.setattr(ZammadClient, "tickets", tickets)
         monkeypatch.setattr(ZammadClient, "articles", articles)
-        await service.synchronize(configuration.id)
+        await service.synchronize(configuration.id, full=True, trigger="manual")
         visible = list(
             (
                 await session.scalars(
@@ -546,7 +561,45 @@ def test_operational_ticket_arguments_are_bounded_and_reject_unknown_fields():
 
 
 @pytest.mark.asyncio
-async def test_ticket_identity_is_isolated_per_configured_zammad_instance():
+async def test_sync_failure_does_not_advance_existing_cursor(monkeypatch):
+    await _reset_database()
+    async with session_factory() as session:
+        service = ZammadService(session, _encryption())
+        saved = await service.save(
+            None,
+            {
+                "name": "Failure-safe Zammad",
+                "base_url": "https://zammad.example.test",
+                "access_token": "secret-token",
+                "enabled": True,
+            },
+        )
+        configuration_id = UUID(saved["id"])
+        configuration = await session.get(ZammadConfigurationModel, configuration_id)
+        original_cursor = datetime(2026, 8, 5, tzinfo=UTC)
+        configuration.sync_cursor_at = original_cursor
+        await session.commit()
+
+        async def lookups(_client):
+            return {}
+
+        async def failed_tickets(_client, **_kwargs):
+            raise ZammadError("UPSTREAM_FAILED", "Zammad request failed.", 502)
+
+        monkeypatch.setattr(ZammadClient, "lookup_tables", lookups)
+        monkeypatch.setattr(ZammadClient, "tickets", failed_tickets)
+        with pytest.raises(ZammadError) as exc:
+            await service.synchronize(
+                configuration_id, full=False, trigger="scheduled"
+            )
+        assert exc.value.code == "UPSTREAM_FAILED"
+        await session.refresh(configuration)
+        assert configuration.sync_cursor_at == original_cursor
+        assert configuration.connection_state == "failed"
+
+
+@pytest.mark.asyncio
+async def test_enabled_zammad_instances_keep_independent_ticket_caches():
     await _reset_database()
     async with session_factory() as session:
         service = ZammadService(session, _encryption())
@@ -570,13 +623,19 @@ async def test_ticket_identity_is_isolated_per_configured_zammad_instance():
             _raw_ticket(1, "10023", "Same remote identity"),
             _articles(1, "Instance-local article"),
         )
-        for configuration_id in (first["id"], second["id"]):
-            configuration = await session.get(ZammadConfigurationModel, UUID(configuration_id))
-            await service._upsert(configuration, ticket, datetime.now(UTC))
+        configuration = await session.get(ZammadConfigurationModel, UUID(first["id"]))
+        await service._upsert(configuration, ticket, datetime.now(UTC))
+        second_configuration = await session.get(
+            ZammadConfigurationModel, UUID(second["id"])
+        )
+        await service._upsert(second_configuration, ticket, datetime.now(UTC))
         await session.commit()
         rows = list((await session.scalars(select(ZammadTicketModel))).all())
         assert len(rows) == 2
-        assert len({row.instance_key for row in rows}) == 2
+        assert {row.configuration_id for row in rows} == {
+            UUID(first["id"]),
+            UUID(second["id"]),
+        }
 
 
 @pytest.mark.asyncio

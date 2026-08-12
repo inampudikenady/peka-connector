@@ -1,12 +1,23 @@
 import re
 from importlib import import_module, metadata
+from pathlib import Path
 
-DEVELOPMENT_VERSION = "0.3.0.dev0"
 _VERSION_PATTERN = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:(?:a|b|rc)\d+|\.dev\d+|-(?:(?:alpha|beta|a|b|rc)\.?\d+|dev(?:\.\d+)?))?"
     r"(?:\+[a-z0-9]+(?:[.-][a-z0-9]+)*)?$"
 )
+
+
+def _source_tree_version() -> str:
+    version_file = Path(__file__).resolve().parents[3] / "VERSION"
+    if version_file.is_file():
+        return version_file.read_text(encoding="utf-8").strip()
+    # Installed builds resolve through package metadata or the generated build module.
+    return "0.0.0+unknown"
+
+
+DEVELOPMENT_VERSION = _source_tree_version()
 
 
 def validate_connector_version(value: str) -> str:
@@ -35,6 +46,10 @@ def runtime_connector_version() -> str:
     except ModuleNotFoundError as exc:
         if exc.name != "app.core._build_version":
             raise
+        # A source checkout is governed by its authoritative VERSION file. Installed
+        # package metadata is only the fallback for distributions without that file.
+        if DEVELOPMENT_VERSION != "0.0.0+unknown":
+            return validate_connector_version(DEVELOPMENT_VERSION)
         return package_connector_version()
     build_version = getattr(build_module, "BUILD_VERSION", None)
     if not isinstance(build_version, str):

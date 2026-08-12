@@ -1,4 +1,3 @@
-import asyncio
 import io
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,7 +106,8 @@ async def test_direct_copy_stability_change_delete_and_restart_state() -> None:
             assert removed["removed"] == 1
             assert document.deletion_requested
             jobs = int(await session.scalar(select(func.count(DocumentDeliveryJobModel.id))) or 0)
-            assert jobs == 3
+            assert jobs == 0
+            assert document.knowledge_status == "DELETE_PENDING"
 
         async with session_factory() as restarted_session:
             restored = await restarted_session.scalar(
@@ -119,7 +119,7 @@ async def test_direct_copy_stability_change_delete_and_restart_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_acknowledgement_marks_exact_version_uploaded() -> None:
+async def test_document_bytes_are_not_delivered_to_saas_in_v1() -> None:
     await _reset()
     settings = get_settings()
     filename = f"delivery-{uuid4()}.txt"
@@ -143,39 +143,35 @@ async def test_acknowledgement_marks_exact_version_uploaded() -> None:
             datetime.now(UTC),
             "https://peka.example.test",
         )
-        worker = DocumentDeliveryWorker(session, settings, fake, encryption)  # type: ignore[arg-type]
-        assert await worker.run_once()
         await session.refresh(document)
-        assert document.delivery_status == "UPLOADED"
-        assert document.remote_document_id == "remote-document"
-        assert document.remote_version_id == "remote-version"
-        assert len(fake.keys) == 1
+        assert document.delivery_status == "LOCAL_ONLY"
+        assert document.knowledge_status == "PENDING"
+        assert document.remote_document_id is None
+        assert document.remote_version_id is None
+        assert fake.keys == []
         job = await session.scalar(
             select(DocumentDeliveryJobModel).where(
                 DocumentDeliveryJobModel.document_id == document.id
             )
         )
-        assert job and job.state == "SUCCEEDED"
-        assert job.spool_path and not await asyncio.to_thread(Path(job.spool_path).exists)
+        assert job is None
         await service.delete(document.id)
         await session.refresh(document)
         assert document.deletion_requested
-        assert document.delivery_status == "PENDING_DELETE"
+        assert document.delivery_status == "LOCAL_ONLY"
+        assert document.knowledge_status == "DELETE_PENDING"
         assert not (settings.managed_documents_root / filename).exists()
-        assert await worker.run_once()
-        await session.refresh(document)
-        assert document.delivery_status == "DELETED"
         delete_job = await session.scalar(
             select(DocumentDeliveryJobModel).where(
                 DocumentDeliveryJobModel.document_id == document.id,
                 DocumentDeliveryJobModel.operation == "DELETE",
             )
         )
-        assert delete_job and delete_job.state == "SUCCEEDED"
+        assert delete_job is None
 
 
 @pytest.mark.asyncio
-async def test_unavailable_saas_keeps_delete_tombstone_retryable() -> None:
+async def test_unavailable_saas_does_not_affect_local_document_lifecycle() -> None:
     await _reset()
     settings = get_settings()
     filename = f"delete-retry-{uuid4()}.txt"
@@ -197,13 +193,6 @@ async def test_unavailable_saas_keeps_delete_tombstone_retryable() -> None:
             headers=Headers({"content-type": "text/plain"}),
         )
         document = await service.upload(upload, 0)
-        acknowledging = DocumentDeliveryWorker(
-            session,
-            settings,
-            AcknowledgingClient(),
-            encryption,  # type: ignore[arg-type]
-        )
-        assert await acknowledging.run_once()
         await service.delete(document.id)
 
         unavailable = DocumentDeliveryWorker(
@@ -212,7 +201,7 @@ async def test_unavailable_saas_keeps_delete_tombstone_retryable() -> None:
             UnavailableClient(),
             encryption,  # type: ignore[arg-type]
         )
-        assert await unavailable.run_once()
+        assert not await unavailable.run_once()
         await session.refresh(document)
         assert document.deletion_requested
         assert document.deleted_at is not None
@@ -222,10 +211,9 @@ async def test_unavailable_saas_keeps_delete_tombstone_retryable() -> None:
                 DocumentDeliveryJobModel.operation == "DELETE",
             )
         )
-        assert delete_job
-        assert delete_job.state == "FAILED_RETRYABLE"
-        assert delete_job.next_retry_at is not None
-        assert document.delivery_status == "FAILED"
+        assert delete_job is None
+        assert document.knowledge_status == "DELETE_PENDING"
+        assert document.delivery_status == "LOCAL_ONLY"
 
 
 @pytest.mark.asyncio

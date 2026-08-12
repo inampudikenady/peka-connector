@@ -1,8 +1,28 @@
 # PEKA Connector
 
-PEKA Connector is a single-container enterprise appliance installed inside a customer environment. It provides a local administration UI, inventories explicitly mounted sources, stores local operational state, and is designed for outbound-only HTTPS communication with PEKA SaaS.
+PEKA Connector 1.0.2 is the customer-resident PEKA data plane. It provides a local
+administration UI, integration access, policy enforcement, document processing, local semantic
+knowledge storage and retrieval, and outbound-only HTTPS communication with PEKA SaaS.
 
-It does **not** perform OCR, parsing, chunking, embeddings, AI inference, or vector indexing. Those remain PEKA SaaS responsibilities.
+The connector performs document extraction, normalization, sensitive-content redaction,
+chunking, local embedding, and indexing. Qdrant is bundled as the internal **Local Knowledge
+Store** and does not require separate customer installation or administration. AI inference and
+conversation orchestration remain PEKA SaaS responsibilities.
+
+## Customer-resident data-plane architecture
+
+The connector manages:
+
+- integration access
+- document processing
+- local semantic knowledge storage and retrieval
+- policy enforcement and content minimization
+- secure communication with PEKA SaaS
+
+Customer systems and durable knowledge indexes remain inside the customer environment. The PEKA
+Connector sends only the authorized context required to fulfil a request to the PEKA SaaS
+service. ServiceNow, Zammad, Prometheus, Loki, VMware, and SolarWinds operational data remains
+live/API-driven unless a future knowledge source is explicitly enabled for indexing.
 
 ## Foundation capabilities
 
@@ -13,7 +33,7 @@ It does **not** perform OCR, parsing, chunking, embeddings, AI inference, or vec
 - typed trusted-plugin framework with Filesystem Documents as the only exposed source type
 - isolated read-only `/data/sources` source tree supporting multiple configured subdirectories
 - metadata reconciliation, SHA-256 hashing, scan metrics/history, missing-file state, and source health
-- controlled document upload/direct-copy ingestion with a durable, idempotent PEKA delivery queue
+- controlled document upload/direct-copy ingestion into the Local Knowledge Store
 - automatic per-source scans with restart recovery and overlap prevention
 - persistent instance identity, outbound SaaS registration, and heartbeat lifecycle
 - AES-256-GCM protection for the connector credential using a deployment-owned key
@@ -32,6 +52,11 @@ It does **not** perform OCR, parsing, chunking, embeddings, AI inference, or vec
     documents/ dedicated writable managed-document volume
 ```
 
+The Local Knowledge Store persists separately in the Docker named volume
+`peka_connector_qdrant_data`, mounted at `/qdrant/storage` inside its internal component. The
+volume survives connector/container restarts, Docker restarts, host reboots, upgrades, and
+`docker compose down`. Normal lifecycle commands must never use `docker compose down -v`.
+
 The database and connector configuration are persisted in `/data`. General customer sources are
 mounted read-only at `/data/external-sources`. Separate sibling named volumes make
 `/data/sources/documents` and `/data/sources/cmdb` writable without nesting them beneath a
@@ -49,7 +74,7 @@ read-only mount.
    administrator fields blank for interactive setup. JWT and encryption secrets are generated
    automatically and persisted with mode `0600` in `/data/config/secrets`.
 
-3. Start the single connector service:
+3. Start the connector deployment:
 
    ```sh
    docker compose up --build -d
@@ -61,7 +86,9 @@ read-only mount.
 
 6. Open **Documents**. The singular **Uploaded Documents** source is already initialized; no source creation is required.
 
-The default Compose file mounts the customer-selected `PEKA_SOURCES_PATH` read-only at
+Compose starts the connector and its internal Local Knowledge Store. Only connector port 8080 is
+published; Qdrant ports 6333 and 6334 are not published. The default Compose file mounts the
+customer-selected `PEKA_SOURCES_PATH` read-only at
 `/data/external-sources`. Managed UI uploads use separate writable named volumes:
 `connector_documents` at `/data/sources/documents` and `connector_cmdb` at
 `/data/sources/cmdb`. A short initialization service assigns those persistent paths to UID/GID
@@ -80,7 +107,8 @@ Registration first enters **Awaiting First Heartbeat**. Only an accepted authent
 
 Every authenticated heartbeat carries the current connector display name, deployment environment, version, and capabilities. Saving a new display name triggers an immediate heartbeat; if SaaS is unavailable, the local change remains and normal heartbeat recovery retries the metadata update. All UI timestamps use the browser's local time zone automatically.
 
-Connected means the appliance is communicating with PEKA. It does not mean a document has been parsed, indexed, or synchronized. Document delivery is acknowledged separately for each immutable content version.
+Connected means the appliance is communicating with PEKA. Local Knowledge Store health and
+document indexing state are reported separately and do not disable live integrations.
 
 ## Managed documents
 
@@ -88,7 +116,10 @@ Administrators can upload TXT, Markdown, PDF, DOCX, XLSX, and CSV files from the
 
 Documents contains **Files** and **Source settings** tabs. Administrators may enable or disable the source, set its 30–86,400 second scan interval, run Scan now, and test directory health. Its name, filesystem type, path, include/exclude policy, and deletion protection are appliance-owned. The previous Sources navigation and generic filesystem creation workflow are not exposed. Existing legacy source rows are retained for future migration tooling but do not replace or interfere with the managed source.
 
-Each delivery uses an idempotency key and remains queued until PEKA explicitly acknowledges the exact SHA-256 hash. Retryable failures use bounded exponential backoff; validation rejection is permanent until the file is corrected. Deleting a UI-uploaded document removes the local file and retains a durable PEKA tombstone until acknowledgement. See [managed document delivery](docs/documents.md).
+Each stable content hash is normalized, sanitized, chunked, embedded locally, and reconciled into
+the Local Knowledge Store by stable document identifier. Updates replace old chunks and deletion
+removes every matching point. If the store is unavailable, the file and pending state remain
+durable while live integrations and heartbeats continue. See [customer data plane](docs/customer-data-plane.md).
 
 ## Connector inventory
 
@@ -99,6 +130,10 @@ and deterministic canonical inventory correlation. See
 The optional read-only [Zammad integration](docs/ZAMMAD.md) synchronizes permitted ticket
 evidence locally, correlates it with canonical CMDB assets, and exposes bounded results through
 the existing operational assistant transport without sending the Zammad credential to SaaS.
+
+The independent [ServiceNow integration](docs/SERVICENOW.md) synchronizes CMDB items and
+relationships, incidents and journals, problems, and changes. It can run alongside Zammad while
+retaining separate credentials, cursors, health, and cache provenance.
 
 ## Optional unattended first run
 
@@ -140,10 +175,16 @@ docker compose config
 docker compose build
 ```
 
-Release builds must set one canonical connector version and pass it through Compose. See the
+`VERSION` is the authoritative release version. Release builds validate the requested image
+version against it. See the
 [release procedure](docs/release.md) for version validation, image labels, and runtime checks.
 
-See [architecture](docs/architecture.md), [managed documents](docs/documents.md), [database](docs/database.md), [plugins](docs/plugins.md), [security](docs/security.md), [installation](docs/installation.md), [PEKA registration](docs/saas-registration.md), [local development](docs/local-development.md), [troubleshooting](docs/troubleshooting.md), [lifecycle E2E](docs/e2e-lifecycle-test.md), [roadmap](docs/roadmap.md), and [ADRs](docs/adr/).
+See [customer data plane](docs/customer-data-plane.md), [architecture](docs/architecture.md),
+[migration plan](docs/knowledge-migration.md), [managed documents](docs/documents.md),
+[database](docs/database.md), [plugins](docs/plugins.md), [security](docs/security.md),
+[installation](docs/installation.md), [PEKA registration](docs/saas-registration.md),
+[local development](docs/local-development.md), [troubleshooting](docs/troubleshooting.md),
+[lifecycle E2E](docs/e2e-lifecycle-test.md), [roadmap](docs/roadmap.md), and [ADRs](docs/adr/).
 
 ## License
 

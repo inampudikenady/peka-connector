@@ -2,7 +2,10 @@
 
 ## Appliance boundary
 
-PEKA Connector is one deployable image and one product service. A Node build stage compiles React, a Python build stage resolves backend dependencies, and the runtime contains FastAPI, migrations, and static UI assets. FastAPI serves both `/api/*` and the SPA on port 8080.
+PEKA Connector is one customer-managed deployment containing the connector product container and
+an internal Local Knowledge Store container. A Node build stage compiles React, a Python build
+stage resolves backend dependencies, and the connector runtime contains FastAPI, migrations, and
+static UI assets. FastAPI serves both `/api/*` and the SPA on port 8080.
 
 ```text
 Administrator browser
@@ -19,10 +22,12 @@ PEKA Connector container :8080
         |              |
 /data/external-sources:ro   /data/state/peka.db
         |
-  documents (writable volume) -> validation/hash -> /data/spool -> PEKA
+  documents (writable volume) -> sanitize/chunk/embed -> Local Knowledge Store
+                                                        /qdrant/storage
 ```
 
 There is no production Nginx, Redis, PostgreSQL, separate frontend, or separate worker service.
+Qdrant is an internal bundled component with no published ports.
 
 ## Backend boundaries
 
@@ -78,4 +83,8 @@ UI upload or controlled directory copy
   -> explicit hash-matching acknowledgement
 ```
 
-APScheduler owns one reconciliation job and one non-overlapping delivery-worker job. Job state is durable, stale in-progress work is recovered after restart, and ambiguous network outcomes retain the same idempotency key. PEKA owns parsing, OCR, chunking, embeddings, indexing, vector storage, and AI.
+APScheduler owns one reconciliation job and one non-overlapping local indexing job. Stable
+document IDs and content hashes reconcile updates without old duplicate versions. The connector
+owns parsing, sanitization, chunking, local embeddings, indexing, vector storage, and retrieval.
+PEKA SaaS owns conversation and AI orchestration and receives bounded authorized context through
+the existing outbound request channel.

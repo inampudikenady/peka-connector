@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "peka-connector"
-version = "0.3.0.dev0"
+version = "1.0.2"
 description = "PEKA enterprise on-premises connector"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,7 +15,10 @@ dependencies = [
   "fastapi>=0.115,<1",
   "greenlet>=3.1,<4",
   "httpx>=0.28,<1",
+  "openpyxl>=3.1,<4",
   "pydantic-settings>=2.7,<3",
+  "pypdf>=5.9,<6",
+  "python-docx>=1.2,<2",
   "pyjwt>=2.10,<3",
   "pwdlib[argon2]>=0.2,<1",
   "python-multipart>=0.0.18,<1",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import socket
 import ssl
@@ -21,6 +22,7 @@ import httpx
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.integrations import IntegrationService
 from app.application.services.inventory import endpoint_identity
 from app.application.services.zammad_relevance import (
     CONCEPT_FAMILIES,
@@ -29,16 +31,20 @@ from app.application.services.zammad_relevance import (
     score_ticket_relevance,
 )
 from app.core.logging import sanitize
+from app.infrastructure.database.models.integration import ConnectorIntegrationModel
 from app.infrastructure.database.models.inventory import (
     InventoryAssetModel,
     InventoryIdentityModel,
 )
+from app.infrastructure.database.models.operations import ProductSettingsModel
 from app.infrastructure.database.models.zammad import (
     ZammadConfigurationModel,
     ZammadTicketArticleModel,
     ZammadTicketModel,
 )
 from app.infrastructure.security.secrets import SecretEncryptionService
+
+logger = logging.getLogger(__name__)
 
 
 class ZammadError(Exception):
@@ -336,6 +342,7 @@ class ZammadClient:
         self.configuration = configuration
         self.token = token
         self.transport = transport
+        self.last_ticket_pages_fetched = 0
 
     async def validate(self) -> dict[str, Any]:
         payload = await self._request(
@@ -381,6 +388,7 @@ class ZammadClient:
     async def tickets(
         self, *, updated_after: datetime | None = None, limit: int = 5000
     ) -> list[dict[str, Any]]:
+        self.last_ticket_pages_fetched = 0
         if updated_after:
             query = f"updated_at:>{updated_after.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}"
             return await self.search(query, limit=limit)
@@ -394,20 +402,35 @@ class ZammadClient:
             )
             if not isinstance(payload, list):
                 raise ZammadError("MALFORMED_RESPONSE", "Zammad ticket page was not a list.")
+            self.last_ticket_pages_fetched += 1
             items.extend(item for item in payload if isinstance(item, dict))
             if len(payload) < per_page or len(items) >= limit:
                 break
         return items[:limit]
 
     async def search(self, query: str, *, limit: int = 5000) -> list[dict[str, Any]]:
-        payload = await self._request(
-            "GET",
-            "/api/v1/tickets/search",
-            params={"query": query, "limit": min(limit, 5000), "expand": "true"},
-        )
-        if not isinstance(payload, list):
-            raise ZammadError("MALFORMED_RESPONSE", "Zammad ticket search response was not a list.")
-        return [item for item in payload if isinstance(item, dict)][:limit]
+        items: list[dict[str, Any]] = []
+        page_size = min(100, limit)
+        for page in range(1, min(100, (limit + page_size - 1) // page_size) + 1):
+            payload = await self._request(
+                "GET",
+                "/api/v1/tickets/search",
+                params={
+                    "query": query,
+                    "page": page,
+                    "limit": page_size,
+                    "expand": "true",
+                },
+            )
+            if not isinstance(payload, list):
+                raise ZammadError(
+                    "MALFORMED_RESPONSE", "Zammad ticket search response was not a list."
+                )
+            self.last_ticket_pages_fetched += 1
+            items.extend(item for item in payload if isinstance(item, dict))
+            if len(payload) < page_size or len(items) >= limit:
+                break
+        return items[:limit]
 
     async def ticket(self, external_id: str) -> dict[str, Any]:
         payload = await self._request(
@@ -575,6 +598,15 @@ class ZammadService:
         self.session.add(model)
         await self.session.commit()
         await self.session.refresh(model)
+        integrations = IntegrationService(self.session, self.encryption)
+        await integrations.bootstrap_legacy_integrations()
+        integration = await self._integration_for_configuration(model.id)
+        if integration.enabled != model.enabled:
+            await integrations.set_enabled(integration.id, model.enabled, None)
+        integration.display_name = model.name
+        integration.status = "healthy" if model.connection_state == "connected" else "attention"
+        integration.last_error = model.last_error
+        await self.session.commit()
         return self._configuration_response(model)
 
     async def delete(self, configuration_id: UUID) -> None:
@@ -590,6 +622,10 @@ class ZammadService:
             model.last_successful_test_at = datetime.now(UTC)
             model.last_error = None
             await self.session.commit()
+            integration = await self._integration_for_configuration(model.id)
+            await IntegrationService(self.session, self.encryption).mark_test_result(
+                integration.id, True
+            )
             return {
                 **result,
                 "message": "Zammad authentication and ticket-read permission validated.",
@@ -598,47 +634,123 @@ class ZammadService:
             model.connection_state = "failed"
             model.last_error = str(exc)[:2000]
             await self.session.commit()
+            integration = await self._integration_for_configuration(model.id)
+            await IntegrationService(self.session, self.encryption).mark_test_result(
+                integration.id, False, str(exc)
+            )
             raise
 
-    async def synchronize(self, configuration_id: UUID) -> dict[str, Any]:
+    async def synchronize(
+        self,
+        configuration_id: UUID,
+        *,
+        full: bool = False,
+        trigger: str = "scheduled",
+    ) -> dict[str, Any]:
         model = await self._configuration(configuration_id)
         if not model.enabled:
             raise ZammadError("ZAMMAD_DISABLED", "The Zammad integration is disabled.", 409)
+        integration = await self._integration_for_configuration(model.id)
+        if not integration.enabled:
+            raise ZammadError("ZAMMAD_DISABLED", "The Zammad integration is disabled.", 409)
+        integration_id = integration.id
         started = time.monotonic()
         now = datetime.now(UTC)
+        cursor_before = model.sync_cursor_at
+        product = await self.session.get(ProductSettingsModel, 1)
+        stats: dict[str, Any] = {
+            "tenant_id": product.tenant_id if product else None,
+            "connector_id": integration.connector_id,
+            "integration_id": str(integration.id),
+            "configuration_id": str(model.id),
+            "trigger": trigger,
+            "cursor_before": cursor_before.isoformat() if cursor_before else None,
+            "cursor_after": None,
+            "pages_fetched": 0,
+            "tickets_fetched": 0,
+            "tickets_normalized": 0,
+            "tickets_stored": 0,
+            "tickets_skipped": 0,
+            "skip_reasons": {},
+            "articles_fetched": 0,
+            "articles_stored": 0,
+        }
+
+        def log_stage(event: str, *, failed: bool = False) -> None:
+            stats["duration_seconds"] = round(time.monotonic() - started, 3)
+            if failed:
+                logger.exception("%s %s", event, sanitize(stats))
+            else:
+                logger.info("%s %s", event, sanitize(stats))
+
+        def skip(reason: str) -> None:
+            stats["tickets_skipped"] += 1
+            reasons = cast(dict[str, int], stats["skip_reasons"])
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+        log_stage("zammad_sync_started")
         try:
             client = self._client(model)
             lookups = await client.lookup_tables()
-            # Normal runs are incremental. At least daily, use a bounded full-window
-            # reconciliation so closed, deleted, or newly inaccessible tickets are
-            # reflected without relying on an unbounded remote export.
+            visible_count = int(
+                await self.session.scalar(
+                    select(func.count(ZammadTicketModel.id)).where(
+                        ZammadTicketModel.configuration_id == model.id,
+                        ZammadTicketModel.visible.is_(True),
+                        ZammadTicketModel.cache_status == "active",
+                    )
+                )
+                or 0
+            )
+            # Manual synchronization is a full reconciliation. An empty cache with a
+            # cursor is treated as recoverable cursor corruption and also forces full.
             reconciliation_due = (
-                model.last_reconciled_at is None
+                full
+                or visible_count == 0
+                or model.last_reconciled_at is None
                 or now - model.last_reconciled_at >= timedelta(hours=24)
             )
             updated_after = None
             if not reconciliation_due and model.sync_cursor_at is not None:
-                updated_after = model.sync_cursor_at - timedelta(minutes=5)
+                updated_after = model.sync_cursor_at - timedelta(minutes=2)
             raw_tickets = await client.tickets(updated_after=updated_after, limit=5000)
+            stats["pages_fetched"] = client.last_ticket_pages_fetched
+            stats["tickets_fetched"] = len(raw_tickets)
+            log_stage("zammad_ticket_fetch_completed")
             cutoff = now - timedelta(days=model.history_window_days)
             allowed_groups = {value.casefold() for value in model.group_filters_json}
             seen: set[str] = set()
-            ticket_count = article_count = 0
+            normalized: list[NormalizedTicket] = []
             for raw in raw_tickets:
                 updated = _date(raw.get("updated_at"))
                 if updated and updated < cutoff:
+                    skip("outside_history_window")
                     continue
-                articles = await client.articles(str(raw.get("id")))
+                external_id = str(raw.get("id") or "")
+                if not external_id:
+                    skip("missing_external_id")
+                    continue
+                articles = await client.articles(external_id)
+                stats["articles_fetched"] += len(articles)
                 ticket = normalize_ticket(raw, articles, lookups)
                 if not model.include_closed_tickets and not ticket.is_open:
+                    skip("closed_ticket_excluded")
                     continue
                 if allowed_groups and str(ticket.group or "").casefold() not in allowed_groups:
+                    skip("group_filter")
                     continue
                 ticket = await self._correlate(ticket)
+                normalized.append(ticket)
+            stats["tickets_normalized"] = len(normalized)
+            log_stage("zammad_ticket_normalization_completed")
+            log_stage("zammad_article_fetch_completed")
+            for ticket in normalized:
                 await self._upsert(model, ticket, now)
                 seen.add(ticket.external_id)
-                ticket_count += 1
-                article_count += len(ticket.articles)
+                stats["tickets_stored"] += 1
+                stats["articles_stored"] += len(ticket.articles)
+            log_stage("zammad_ticket_cache_write_completed")
+            log_stage("zammad_article_cache_write_completed")
             if reconciliation_due:
                 stale = select(ZammadTicketModel).where(
                     ZammadTicketModel.configuration_id == model.id
@@ -648,14 +760,17 @@ class ZammadService:
                 await self.session.execute(
                     update(ZammadTicketModel)
                     .where(ZammadTicketModel.id.in_(stale.with_only_columns(ZammadTicketModel.id)))
-                    .values(visible=False)
+                    .values(visible=False, cache_status="deleted")
                 )
             updated_dates = [
                 value
                 for value in (_date(item.get("updated_at")) for item in raw_tickets)
                 if value is not None
             ]
-            model.sync_cursor_at = max(updated_dates, default=now)
+            # Never move an incremental cursor forward when the remote query is empty.
+            # This makes an incorrect future cursor self-recoverable on the next full run.
+            if updated_dates:
+                model.sync_cursor_at = max(updated_dates)
             model.last_successful_sync_at = now
             if reconciliation_due:
                 model.last_reconciled_at = now
@@ -686,22 +801,43 @@ class ZammadService:
             )
             model.connection_state = "connected"
             model.last_error = None
+            stats["cursor_after"] = (
+                model.sync_cursor_at.isoformat() if model.sync_cursor_at else None
+            )
+            stats["duration_seconds"] = model.last_sync_duration_seconds
             await self.session.commit()
+            await IntegrationService(self.session, self.encryption).mark_sync_result(
+                integration_id, True
+            )
+            log_stage("zammad_sync_completed")
             return {
-                "ticket_count": ticket_count,
-                "article_count": article_count,
+                "ticket_count": stats["tickets_stored"],
+                "article_count": stats["articles_stored"],
+                "cached_ticket_count": model.synchronized_ticket_count,
+                "cached_article_count": model.synchronized_article_count,
+                "full_reconciliation": reconciliation_due,
+                "pages_fetched": stats["pages_fetched"],
+                "tickets_skipped": stats["tickets_skipped"],
                 "duration_seconds": model.last_sync_duration_seconds,
                 "cache_timestamp": now.isoformat(),
                 "live": True,
             }
-        except ZammadError as exc:
+        except Exception as exc:
+            await self.session.rollback()
+            model = await self._configuration(configuration_id)
             model.connection_state = "failed"
-            model.last_error = str(exc)[:2000]
+            safe_error = str(sanitize(str(exc)))[:2000]
+            model.last_error = safe_error
             await self.session.commit()
+            await IntegrationService(self.session, self.encryption).mark_sync_result(
+                integration_id, False, safe_error
+            )
+            stats["error_category"] = getattr(exc, "code", type(exc).__name__)
+            log_stage("zammad_sync_failed", failed=True)
             raise
 
     async def search_tickets(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        configuration = await self._active_configuration(require_enabled=True)
+        configuration = await self._enabled_configuration(require_enabled=True)
         query = str(arguments.get("query") or "").strip()
         terms = expand_concepts(query)
         state = str(arguments.get("state") or "all")
@@ -814,7 +950,7 @@ class ZammadService:
         )
 
     async def get_ticket(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        configuration = await self._active_configuration(require_enabled=False)
+        configuration = await self._enabled_configuration(require_enabled=False)
         identifier = str(
             arguments.get("ticket_number") or arguments.get("external_id") or ""
         ).lstrip("#")
@@ -856,7 +992,7 @@ class ZammadService:
         }
 
     async def get_ticket_counts(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        configuration = await self._active_configuration(require_enabled=False)
+        configuration = await self._enabled_configuration(require_enabled=False)
         live = False
         warning = None
         if configuration.enabled:
@@ -887,7 +1023,7 @@ class ZammadService:
         }
 
     async def get_asset_tickets(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        configuration = await self._active_configuration(require_enabled=False)
+        configuration = await self._enabled_configuration(require_enabled=False)
         identifier = str(arguments.get("identifier") or "")
         asset_id = await self._resolve_asset_identifier(identifier)
         if asset_id is None:
@@ -975,7 +1111,7 @@ class ZammadService:
         )
         if base.get("match_status") != "found":
             return {**base, "correlations": []}
-        configuration = await self._active_configuration(require_enabled=False)
+        configuration = await self._enabled_configuration(require_enabled=False)
         rows = await self._ticket_rows(configuration.id)
         asset_id = str(base["asset_id"])
         start = _date(arguments.get("evidence_start"))
@@ -1208,16 +1344,23 @@ class ZammadService:
         ticket: NormalizedTicket,
         synchronized_at: datetime,
     ) -> ZammadTicketModel:
+        integration = await self._integration_for_configuration(configuration.id)
         model = await self.session.scalar(
             select(ZammadTicketModel).where(
-                ZammadTicketModel.configuration_id == configuration.id,
-                ZammadTicketModel.external_id == ticket.external_id,
+                ZammadTicketModel.integration_id == integration.id,
+                ZammadTicketModel.source_record_id == ticket.external_id,
             )
         )
         if model is None:
             model = ZammadTicketModel(
                 configuration_id=configuration.id,
                 instance_key=configuration.instance_key,
+                connector_id=integration.connector_id,
+                integration_id=integration.id,
+                source_record_id=ticket.external_id,
+                source_updated_at=ticket.updated_at,
+                synced_at=synchronized_at,
+                cache_status="active",
                 external_id=ticket.external_id,
                 number=ticket.number,
                 title=ticket.title,
@@ -1256,8 +1399,17 @@ class ZammadService:
             "search_text": ticket.search_text,
             "visible": True,
             "synchronized_at": synchronized_at,
+            "connector_id": integration.connector_id,
+            "integration_type": integration.integration_type,
+            "integration_id": integration.id,
+            "source_record_id": ticket.external_id,
+            "source_updated_at": ticket.updated_at,
+            "synced_at": synchronized_at,
+            "cache_status": "active",
         }.items():
             setattr(model, name, value)
+        integration.initial_sync_status = "completed"
+        integration.last_successful_sync_at = synchronized_at
         existing = {
             item.external_id: item
             for item in (
@@ -1302,12 +1454,16 @@ class ZammadService:
         return model
 
     async def _ticket_rows(self, configuration_id: UUID) -> list[ZammadTicketModel]:
+        integration = await self._integration_enabled_for_configuration(
+            configuration_id, require_synced=True
+        )
         return list(
             (
                 await self.session.scalars(
                     select(ZammadTicketModel)
                     .where(
-                        ZammadTicketModel.configuration_id == configuration_id,
+                        ZammadTicketModel.integration_id == integration.id,
+                        ZammadTicketModel.cache_status == "active",
                         ZammadTicketModel.visible.is_(True),
                     )
                     .order_by(ZammadTicketModel.updated_at_source.desc())
@@ -1318,11 +1474,15 @@ class ZammadService:
     async def _find_ticket(
         self, configuration_id: UUID, identifier: str
     ) -> ZammadTicketModel | None:
+        integration = await self._integration_enabled_for_configuration(
+            configuration_id, require_synced=True
+        )
         return cast(
             ZammadTicketModel | None,
             await self.session.scalar(
                 select(ZammadTicketModel).where(
-                    ZammadTicketModel.configuration_id == configuration_id,
+                    ZammadTicketModel.integration_id == integration.id,
+                    ZammadTicketModel.cache_status == "active",
                     ZammadTicketModel.visible.is_(True),
                     or_(
                         ZammadTicketModel.number == identifier,
@@ -1497,19 +1657,75 @@ class ZammadService:
             raise ZammadError("CONFIGURATION_NOT_FOUND", "Zammad configuration was not found.", 404)
         return model
 
-    async def _active_configuration(self, *, require_enabled: bool) -> ZammadConfigurationModel:
-        query = select(ZammadConfigurationModel)
-        model = await self.session.scalar(
-            query.order_by(
-                ZammadConfigurationModel.enabled.desc(),
-                ZammadConfigurationModel.last_successful_sync_at.desc(),
+    async def _enabled_configuration(self, *, require_enabled: bool) -> ZammadConfigurationModel:
+        integration = await self._enabled_integration(require_synced=True)
+        if integration.legacy_zammad_configuration_id is None:
+            raise ZammadError(
+                "ZAMMAD_CONFIGURATION_UNAVAILABLE",
+                "The enabled Zammad integration does not have a configured adapter.",
+                503,
             )
-        )
-        if model is None:
-            raise ZammadError("ZAMMAD_NOT_CONFIGURED", "Zammad is not configured.", 503)
+        model = await self._configuration(integration.legacy_zammad_configuration_id)
         if require_enabled and not model.enabled:
             raise ZammadError("ZAMMAD_DISABLED", "The Zammad integration is disabled.", 503)
         return model
+
+    async def _enabled_integration(
+        self, *, require_synced: bool
+    ) -> ConnectorIntegrationModel:
+        await IntegrationService(self.session, self.encryption).bootstrap_legacy_integrations()
+        connector_id = await IntegrationService(self.session, self.encryption).connector_id()
+        integration = await self.session.scalar(
+            select(ConnectorIntegrationModel)
+            .where(
+                ConnectorIntegrationModel.connector_id == connector_id,
+                ConnectorIntegrationModel.integration_type == "zammad",
+                ConnectorIntegrationModel.enabled.is_(True),
+            )
+            .order_by(ConnectorIntegrationModel.created_at)
+        )
+        if integration is None:
+            raise ZammadError(
+                "TICKETING_PROVIDER_UNAVAILABLE",
+                "No enabled Zammad integration is configured.",
+                503,
+            )
+        if require_synced and integration.initial_sync_status != "completed":
+            raise ZammadError(
+                "TICKETING_INITIAL_SYNC_INCOMPLETE",
+                "Zammad is enabled, but its initial synchronization has not completed.",
+                503,
+            )
+        return integration
+
+    async def _integration_enabled_for_configuration(
+        self, configuration_id: UUID, *, require_synced: bool
+    ) -> ConnectorIntegrationModel:
+        integration = await self._integration_for_configuration(configuration_id)
+        if not integration.enabled:
+            raise ZammadError("ZAMMAD_DISABLED", "The Zammad integration is disabled.", 503)
+        if require_synced and integration.initial_sync_status != "completed":
+            raise ZammadError(
+                "TICKETING_INITIAL_SYNC_INCOMPLETE",
+                "Zammad is enabled, but its initial synchronization has not completed.",
+                503,
+            )
+        return integration
+
+    async def _integration_for_configuration(
+        self, configuration_id: UUID
+    ) -> ConnectorIntegrationModel:
+        await IntegrationService(self.session, self.encryption).bootstrap_legacy_integrations()
+        integration = await self.session.scalar(
+            select(ConnectorIntegrationModel).where(
+                ConnectorIntegrationModel.legacy_zammad_configuration_id == configuration_id
+            )
+        )
+        if integration is None:
+            raise ZammadError(
+                "INTEGRATION_NOT_FOUND", "Zammad integration record was not found.", 503
+            )
+        return integration
 
     def _client(self, model: ZammadConfigurationModel) -> ZammadClient:
         if not model.encrypted_access_token:

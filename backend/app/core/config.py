@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     document_worker_interval_seconds: int = Field(default=5, ge=1, le=300)
     operational_tool_poll_interval_seconds: int = Field(default=2, ge=1, le=30)
     document_job_max_attempts: int = Field(default=8, ge=1, le=100)
+    knowledge_worker_interval_seconds: int = Field(default=10, ge=1, le=300)
+    qdrant_url: str = "http://qdrant:6333"
+    qdrant_collection: str = "peka_documents"
+    qdrant_timeout_seconds: float = Field(default=10, ge=1, le=60)
+    knowledge_embedding_dimension: int = Field(default=384, ge=32, le=4096)
+    knowledge_default_top_k: int = Field(default=5, ge=1, le=20)
+    knowledge_max_chunk_characters: int = Field(default=4000, ge=500, le=20000)
     cmdb_max_file_size_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
     cmdb_max_row_count: int = Field(default=100_000, ge=1, le=1_000_000)
     minimum_free_disk_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
@@ -53,6 +60,14 @@ class Settings(BaseSettings):
         if not value.startswith("sqlite+aiosqlite:///"):
             raise ValueError("PEKA Connector currently supports SQLite only")
         return value
+
+    @field_validator("qdrant_url")
+    @classmethod
+    def require_internal_qdrant_url(cls, value: str) -> str:
+        normalized = value.rstrip("/")
+        if normalized != "http://qdrant:6333":
+            raise ValueError("The Local Knowledge Store must use the internal qdrant service")
+        return normalized
 
     @field_validator("bootstrap_admin_username", mode="before")
     @classmethod

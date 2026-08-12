@@ -1,4 +1,4 @@
-ARG PEKA_CONNECTOR_VERSION=0.3.0.dev0
+ARG PEKA_CONNECTOR_VERSION=1.0.2
 ARG PEKA_BUILD_REVISION=local
 ARG PEKA_BUILD_CREATED=unknown
 ARG PEKA_BUILD_SOURCE=local
@@ -19,10 +19,12 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 WORKDIR /build/backend
 COPY backend/pyproject.toml ./
+COPY VERSION /build/VERSION
 COPY backend/app ./app
 COPY backend/scripts ./scripts
-RUN PYTHONPATH=. python scripts/prepare_build_version.py \
-    "${PEKA_CONNECTOR_VERSION}" pyproject.toml app/core/_build_version.py
+RUN test "$(tr -d '\r\n' < /build/VERSION)" = "${PEKA_CONNECTOR_VERSION}" \
+    && PYTHONPATH=. python scripts/prepare_build_version.py \
+       "${PEKA_CONNECTOR_VERSION}" pyproject.toml app/core/_build_version.py
 RUN python -m pip install --prefix=/install .
 
 
@@ -52,6 +54,7 @@ RUN groupadd --gid 10001 peka \
 WORKDIR /app
 COPY --from=backend-builder /install /usr/local
 COPY --chown=peka:peka backend/app ./app
+COPY --chown=peka:peka VERSION release.json ./
 COPY --from=backend-builder --chown=peka:peka /build/backend/app/core/_build_version.py ./app/core/_build_version.py
 COPY --chown=peka:peka backend/alembic ./alembic
 COPY --chown=peka:peka backend/alembic.ini ./alembic.ini

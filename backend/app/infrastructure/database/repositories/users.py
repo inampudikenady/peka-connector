@@ -34,9 +34,18 @@ class SqlAlchemyUserRepository:
         return [self._to_entity(model) for model in result.all()]
 
     async def create(
-        self, username: str, password_hash: str, role: str = "administrator"
+        self,
+        username: str,
+        password_hash: str,
+        role: str = "administrator",
+        active: bool = True,
     ) -> UserAccount:
-        user = UserModel(username=username, password_hash=password_hash, role=role)
+        user = UserModel(
+            username=username,
+            password_hash=password_hash,
+            role=role,
+            is_active=active,
+        )
         self._session.add(user)
         await self._session.commit()
         await self._session.refresh(user)

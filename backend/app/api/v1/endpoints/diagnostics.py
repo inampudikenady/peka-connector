@@ -13,13 +13,11 @@ from sqlalchemy import select, text
 
 from app.api.dependencies import CurrentUser, OperationsDep, SessionDep, SettingsDep
 from app.api.schemas import DiagnosticCheck, DiagnosticsResponse
-from app.application.services.documents import DocumentDeliveryWorker
+from app.application.services.knowledge import LocalKnowledgeService
 from app.core.logging import sanitize
 from app.core.version import CONNECTOR_VERSION
-from app.infrastructure.database.models.document import DocumentDeliveryJobModel
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
-from app.infrastructure.saas.client import HttpxPEKASaaSClient
 from app.infrastructure.scheduling import connector_scheduler
 from app.infrastructure.security.secrets import SecretEncryptionService
 
@@ -73,12 +71,7 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
     documents_writable = documents_root.is_dir() and os.access(documents_root, os.W_OK)
     cmdb_root = settings.managed_cmdb_root
     cmdb_writable = cmdb_root.is_dir() and os.access(cmdb_root, os.W_OK | os.X_OK)
-    spool = settings.data_root / "spool"
-    successful_delivery = await session.scalar(
-        select(DocumentDeliveryJobModel.id)
-        .where(DocumentDeliveryJobModel.state == "SUCCEEDED")
-        .limit(1)
-    )
+    knowledge_healthy = await LocalKnowledgeService(session, settings).health_check()
     managed_sources = list(
         (
             await session.scalars(select(SourceModel).where(SourceModel.system_managed.is_(True)))
@@ -146,19 +139,15 @@ async def _checks(session: SessionDep, settings: SettingsDep) -> list[Diagnostic
                 ),
             ),
             DiagnosticCheck(
-                name="Document spool",
-                status="healthy" if spool.is_dir() and os.access(spool, os.W_OK) else "unhealthy",
-                detail="Spool is writable"
-                if spool.is_dir() and os.access(spool, os.W_OK)
-                else "Spool is unavailable",
-            ),
-            DiagnosticCheck(
-                name="Document delivery API",
-                status="healthy" if successful_delivery else "unavailable",
+                name="Local Knowledge Store",
+                status="healthy" if knowledge_healthy else "unavailable",
                 detail=(
-                    "At least one document delivery was acknowledged"
-                    if successful_delivery
-                    else "Endpoint availability is confirmed only by an acknowledged delivery"
+                    "Local indexing and retrieval are available"
+                    if knowledge_healthy
+                    else (
+                        "Local indexing and retrieval are unavailable; "
+                        "live integrations remain available"
+                    )
                 ),
             ),
             DiagnosticCheck(
@@ -229,17 +218,6 @@ async def diagnostics(
         if product.connector_id and product.encrypted_connector_secret
         else "unregistered"
     )
-    worker = DocumentDeliveryWorker(
-        session,
-        settings,
-        HttpxPEKASaaSClient(
-            settings.saas_connect_timeout_seconds,
-            settings.saas_read_timeout_seconds,
-            settings.tls_verify,
-        ),
-        SecretEncryptionService(settings.encryption_key),
-    )
-    pending_jobs, stale_jobs = await worker.counts()
     return DiagnosticsResponse(
         version=CONNECTOR_VERSION,
         build=os.getenv("PEKA_BUILD_ID", "development"),
@@ -263,8 +241,8 @@ async def diagnostics(
         source_scheduler_job_count=connector_scheduler.source_job_count,
         document_worker_running=connector_scheduler.document_worker_running,
         document_reconciliation_scheduled=connector_scheduler.document_reconciliation_scheduled,
-        pending_document_jobs=pending_jobs,
-        stale_document_jobs=stale_jobs,
+        pending_document_jobs=0,
+        stale_document_jobs=0,
     )
 
 

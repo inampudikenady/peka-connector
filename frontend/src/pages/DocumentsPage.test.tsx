@@ -30,6 +30,9 @@ function managedDocument(overrides: Partial<ManagedDocument> = {}): ManagedDocum
     state: 'active',
     local_status: 'UPLOADED',
     delivery_status: 'UPLOADED',
+    knowledge_status: 'INDEXED',
+    indexed_chunk_count: 3,
+    knowledge_error: null,
     upload_attempt_count: 1,
     last_upload_attempt_at: null,
     uploaded_at: null,
@@ -49,7 +52,9 @@ function managedDocument(overrides: Partial<ManagedDocument> = {}): ManagedDocum
 }
 
 describe('Documents UI', () => {
-  it('has a top-level Documents navigation entry', () => {
+  it('exposes customer-resident Documents as a primary connector page', () => {
+    expect(navigationItems.find((item) => item.label === 'Integrations')?.path).toBe('/integrations');
+    expect(navigationItems.some((item) => item.label === 'Data & Sync')).toBe(false);
     expect(navigationItems.find((item) => item.label === 'Documents')?.path).toBe('/documents');
     expect(navigationItems.some((item) => item.label === 'Sources')).toBe(false);
     expect(LEGACY_SOURCES_REDIRECT).toBe('/documents');

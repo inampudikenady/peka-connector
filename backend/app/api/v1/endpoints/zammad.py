@@ -85,7 +85,7 @@ async def synchronize(
     operations: OperationsDep,
 ) -> dict[str, Any]:
     correlation_id = str(uuid4())
-    result = await service.synchronize(configuration_id)
+    result = await service.synchronize(configuration_id, full=True, trigger="manual")
     await operations.record_event(
         "zammad.sync_completed",
         f"Zammad synchronization completed: {result['ticket_count']} tickets",

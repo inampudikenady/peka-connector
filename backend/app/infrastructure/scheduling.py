@@ -8,15 +8,18 @@ from apscheduler.triggers.date import DateTrigger  # type: ignore[import-untyped
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
 from sqlalchemy import select, update
 
-from app.application.services.documents import DocumentDeliveryWorker, ManagedDocumentService
+from app.application.services.documents import ManagedDocumentService
+from app.application.services.knowledge import LocalKnowledgeService
 from app.application.services.operational_tools import OperationalToolWorker
 from app.application.services.prometheus import PrometheusService
 from app.application.services.saas import HeartbeatService, RegistrationStateError
+from app.application.services.servicenow import ServiceNowService
 from app.application.services.sources import ScanInProgressError, SourceService
 from app.application.services.zammad import ZammadService
 from app.core.config import get_settings
 from app.domain.ports.saas import SaaSClientError
 from app.infrastructure.database.models.inventory import PrometheusConfigurationModel
+from app.infrastructure.database.models.servicenow import ServiceNowConfigurationModel
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.database.models.zammad import ZammadConfigurationModel
 from app.infrastructure.database.repositories.documents import SqlAlchemyDocumentRepository
@@ -89,7 +92,7 @@ class ConnectorScheduler:
 
     @property
     def document_worker_running(self) -> bool:
-        return self.running and self._scheduler.get_job("documents:delivery") is not None
+        return self.running and self._scheduler.get_job("knowledge:index") is not None
 
     def source_interval_seconds(self, source_id: UUID) -> float | None:
         job = self._scheduler.get_job(f"source:{source_id}")
@@ -109,38 +112,28 @@ class ConnectorScheduler:
                 (await session.scalars(select(PrometheusConfigurationModel.id))).all()
             )
             zammad_ids = list((await session.scalars(select(ZammadConfigurationModel.id))).all())
+            servicenow_ids = list(
+                (await session.scalars(select(ServiceNowConfigurationModel.id))).all()
+            )
         for source in sources:
             await self.reconcile_source(source.id)
         for configuration_id in prometheus_ids:
             await self.reconcile_prometheus(configuration_id)
         for configuration_id in zammad_ids:
             await self.reconcile_zammad(configuration_id)
+        for configuration_id in servicenow_ids:
+            await self.reconcile_servicenow(configuration_id)
         settings = get_settings()
-        async with session_factory() as session:
-            worker = DocumentDeliveryWorker(
-                session,
-                settings,
-                HttpxPEKASaaSClient(
-                    settings.saas_connect_timeout_seconds,
-                    settings.saas_read_timeout_seconds,
-                    settings.tls_verify,
-                ),
-                SecretEncryptionService(settings.encryption_key),
-            )
-            recovered = await worker.recover_stale()
         await self.reconcile_document_schedule()
         self._scheduler.add_job(
-            self._run_document_delivery,
-            IntervalTrigger(seconds=settings.document_worker_interval_seconds, timezone=UTC),
-            id="documents:delivery",
+            self._run_knowledge_indexing,
+            IntervalTrigger(seconds=settings.knowledge_worker_interval_seconds, timezone=UTC),
+            id="knowledge:index",
             replace_existing=True,
             max_instances=1,
             coalesce=True,
         )
-        logger.info(
-            "Managed document jobs registered",
-            extra={"recovered_stale_jobs": recovered},
-        )
+        logger.info("Managed document reconciliation and local indexing jobs registered")
         self._scheduler.add_job(
             self._run_operational_tool,
             IntervalTrigger(
@@ -261,6 +254,86 @@ class ConnectorScheduler:
         job = self._scheduler.get_job(f"zammad:{configuration_id}")
         if job:
             self._scheduler.remove_job(job.id)
+
+    async def reconcile_servicenow(self, configuration_id: UUID) -> None:
+        job_id = f"servicenow:{configuration_id}"
+        async with session_factory() as session:
+            configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
+            if configuration is None or not configuration.enabled:
+                if self._scheduler.get_job(job_id):
+                    self._scheduler.remove_job(job_id)
+                if configuration:
+                    configuration.next_scheduled_sync_at = None
+                    await session.commit()
+                return
+            seconds = configuration.sync_interval_seconds
+            job = self._scheduler.add_job(
+                self._run_servicenow_sync,
+                IntervalTrigger(seconds=seconds, timezone=UTC),
+                args=[configuration_id],
+                id=job_id,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=max(30, min(seconds, 300)),
+            )
+            configuration.next_scheduled_sync_at = job.next_run_time
+            await session.commit()
+        logger.info(
+            "ServiceNow synchronization job registered",
+            extra={"configuration_id": str(configuration_id), "interval_seconds": seconds},
+        )
+
+    async def remove_servicenow(self, configuration_id: UUID) -> None:
+        job = self._scheduler.get_job(f"servicenow:{configuration_id}")
+        if job:
+            self._scheduler.remove_job(job.id)
+
+    async def _run_servicenow_sync(self, configuration_id: UUID) -> None:
+        correlation_id = uuid4()
+        async with session_factory() as session:
+            operations = SqlAlchemyOperationsRepository(session)
+            service = ServiceNowService(
+                session, SecretEncryptionService(get_settings().encryption_key)
+            )
+            try:
+                result = await service.synchronize(
+                    configuration_id, full=False, trigger="scheduled"
+                )
+                await operations.record_event(
+                    "servicenow.sync_completed",
+                    "Scheduled ServiceNow synchronization completed",
+                    target_type="servicenow_configuration",
+                    target_id=str(configuration_id),
+                    details={
+                        "trigger": "scheduled",
+                        "integration": "servicenow",
+                        "correlation_id": str(correlation_id),
+                        "counts": result["counts"],
+                    },
+                    component="servicenow",
+                )
+            except Exception as exc:
+                await operations.record_event(
+                    "servicenow.sync_failed",
+                    "Scheduled ServiceNow synchronization failed",
+                    target_type="servicenow_configuration",
+                    target_id=str(configuration_id),
+                    details={
+                        "trigger": "scheduled",
+                        "integration": "servicenow",
+                        "correlation_id": str(correlation_id),
+                        "error_category": getattr(exc, "code", type(exc).__name__),
+                    },
+                    level="ERROR",
+                    component="servicenow",
+                )
+            finally:
+                configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
+                job = self._scheduler.get_job(f"servicenow:{configuration_id}")
+                if configuration:
+                    configuration.next_scheduled_sync_at = job.next_run_time if job else None
+                    await session.commit()
 
     async def _run_zammad_sync(self, configuration_id: UUID) -> None:
         correlation_id = uuid4()
@@ -388,7 +461,7 @@ class ConnectorScheduler:
         )
 
     async def deliver_documents_now(self) -> None:
-        await self._run_document_delivery()
+        await self._run_knowledge_indexing()
 
     async def _run_document_reconciliation(self) -> None:
         if self._document_reconcile_lock.locked():
@@ -442,27 +515,17 @@ class ConnectorScheduler:
                     source.next_scheduled_scan_at = job.next_run_time if job else None
                     await session.commit()
 
-    async def _run_document_delivery(self) -> None:
+    async def _run_knowledge_indexing(self) -> None:
         if self._document_worker_lock.locked():
-            logger.info("Document delivery skipped because the worker is already running")
+            logger.info("Local knowledge indexing skipped because the worker is already running")
             return
         async with self._document_worker_lock:
             settings = get_settings()
             async with session_factory() as session:
-                worker = DocumentDeliveryWorker(
-                    session,
-                    settings,
-                    HttpxPEKASaaSClient(
-                        settings.saas_connect_timeout_seconds,
-                        settings.saas_read_timeout_seconds,
-                        settings.tls_verify,
-                    ),
-                    SecretEncryptionService(settings.encryption_key),
-                )
                 try:
-                    await worker.run_once()
+                    await LocalKnowledgeService(session, settings).process_pending()
                 except Exception:
-                    logger.exception("Document delivery worker failed unexpectedly")
+                    logger.exception("Local knowledge indexing worker failed unexpectedly")
 
     async def _run_operational_tool(self) -> None:
         if self._operational_tool_lock.locked():

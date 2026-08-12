@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -11,9 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.inventory import InventoryService
+from app.application.services.knowledge import (
+    KnowledgeIdentityError,
+    KnowledgeUnavailableError,
+    LocalKnowledgeService,
+)
 from app.application.services.loki import LokiError, LokiService
 from app.application.services.prometheus import PrometheusError, PrometheusService
-from app.application.services.zammad import ZammadError, ZammadService
+from app.application.services.servicenow import ServiceNowError, ServiceNowService
+from app.application.services.ticketing import TICKETING_TOOL_NAMES, TicketingProviderService
+from app.application.services.zammad import ZammadError
 from app.core.config import Settings
 from app.domain.ports.saas import (
     OperationalToolRequest,
@@ -23,6 +32,8 @@ from app.domain.ports.saas import (
 from app.infrastructure.database.models.inventory import InventoryAssetModel
 from app.infrastructure.database.repositories.operations import SqlAlchemyOperationsRepository
 from app.infrastructure.security.secrets import SecretEncryptionService
+
+logger = logging.getLogger(__name__)
 
 
 class _Arguments(BaseModel):
@@ -74,6 +85,12 @@ class EmptyArguments(_Arguments):
     pass
 
 
+class KnowledgeSearchArguments(_Arguments):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+    document_id: UUID | None = None
+
+
 class TicketSearchArguments(_Arguments):
     query: str | None = Field(default=None, max_length=1000)
     state: Literal["open", "closed", "all"] = "all"
@@ -110,6 +127,49 @@ class TicketCorrelationArguments(AssetArguments):
     warning_strings: list[str] = Field(default_factory=list, max_length=20)
     service_names: list[str] = Field(default_factory=list, max_length=20)
     symptoms: str | None = Field(default=None, max_length=1000)
+
+
+SERVICENOW_TOOL_NAMES = frozenset(
+    {
+        "servicenow_get_status",
+        "servicenow_get_incident",
+        "servicenow_search_incidents",
+        "servicenow_list_open_incidents",
+        "servicenow_get_incident_updates",
+        "servicenow_get_ci",
+        "servicenow_get_ci_relationships",
+        "servicenow_get_ci_tickets",
+        "servicenow_search_problems",
+        "servicenow_search_changes",
+    }
+)
+
+MULTI_SOURCE_TOOL_NAMES = frozenset({"get_all_ticket_sources"})
+NORMALIZED_TICKETING_TOOL_NAMES = frozenset({"ticketing_search_records"})
+
+
+class ServiceNowSearchArguments(_Arguments):
+    query: str | None = Field(default=None, max_length=1000)
+    identifier: str | None = Field(default=None, max_length=255)
+    limit: int = Field(default=25, ge=1, le=50)
+
+
+class ServiceNowIncidentArguments(_Arguments):
+    number: str = Field(min_length=1, max_length=100)
+
+
+class ServiceNowCIArguments(AssetArguments):
+    max_depth: int = Field(default=3, ge=1, le=3)
+
+
+class NormalizedTicketingArguments(_Arguments):
+    mode: Literal["search", "count", "asset"] = "search"
+    state: Literal["all", "open", "closed"] = "open"
+    query: str | None = Field(default=None, max_length=1000)
+    identifier: str | None = Field(default=None, max_length=500)
+    providers: list[Literal["zammad", "servicenow"]] = Field(default_factory=list, max_length=2)
+    limit: int = Field(default=50, ge=1, le=50)
+    updated_from: datetime | None = None
 
 
 def _classify_log_impact(item: dict[str, Any], *, historical: bool) -> tuple[str, str]:
@@ -526,26 +586,96 @@ class OperationalToolExecutor:
         self.inventory = InventoryService(session)
         self.prometheus = PrometheusService(session, secrets, settings)
         self.loki = LokiService(session, secrets, settings)
-        self.zammad = ZammadService(session, secrets)
+        self.ticketing = TicketingProviderService(session, secrets)
+        self.servicenow = ServiceNowService(session, secrets)
+        self.knowledge = LocalKnowledgeService(session, settings)
 
     async def execute(self, request: OperationalToolRequest) -> dict[str, Any]:
+        if request.tool_name == "knowledge_search":
+            knowledge_arguments = KnowledgeSearchArguments.model_validate(request.arguments)
+            results = await self.knowledge.search(
+                knowledge_arguments.query,
+                knowledge_arguments.top_k,
+                knowledge_arguments.document_id,
+            )
+            return {
+                "results": [
+                    {
+                        "document_id": str(item.document_id),
+                        "chunk_id": str(item.chunk_id),
+                        "content": item.content,
+                        "score": item.score,
+                        "source": item.source,
+                        "metadata": item.metadata,
+                    }
+                    for item in results
+                ]
+            }
+        if request.tool_name in NORMALIZED_TICKETING_TOOL_NAMES:
+            arguments = NormalizedTicketingArguments.model_validate(request.arguments).model_dump()
+            if arguments["mode"] == "asset" and not arguments.get("identifier"):
+                raise ValueError("A CI or server identifier is required")
+            return await self.ticketing.search_enabled_records(arguments)
+        if request.tool_name in MULTI_SOURCE_TOOL_NAMES:
+            arguments = AssetArguments.model_validate(request.arguments).model_dump()
+            sources: dict[str, Any] = {}
+            try:
+                sources["zammad"] = await self.ticketing.zammad.get_asset_tickets(arguments)
+            except ZammadError as exc:
+                sources["zammad"] = {
+                    "available": False,
+                    "error_code": exc.code,
+                    "error_message": str(exc),
+                }
+            try:
+                sources["servicenow"] = await self.servicenow.execute_tool(
+                    "servicenow_get_ci_tickets", arguments
+                )
+            except ServiceNowError as exc:
+                sources["servicenow"] = {
+                    "available": False,
+                    "error_code": exc.code,
+                    "error_message": str(exc),
+                }
+            return {"identifier": arguments["identifier"], "sources": sources}
+        if request.tool_name in SERVICENOW_TOOL_NAMES:
+            if request.tool_name == "servicenow_get_status":
+                arguments = EmptyArguments.model_validate(request.arguments).model_dump()
+            elif request.tool_name in {
+                "servicenow_get_incident",
+                "servicenow_get_incident_updates",
+            }:
+                arguments = ServiceNowIncidentArguments.model_validate(
+                    request.arguments
+                ).model_dump()
+            elif request.tool_name in {
+                "servicenow_get_ci",
+                "servicenow_get_ci_relationships",
+                "servicenow_get_ci_tickets",
+            }:
+                arguments = ServiceNowCIArguments.model_validate(request.arguments).model_dump()
+            else:
+                arguments = ServiceNowSearchArguments.model_validate(request.arguments).model_dump()
+            return await self.servicenow.execute_tool(request.tool_name, arguments)
+        if request.tool_name in TICKETING_TOOL_NAMES:
+            await self.ticketing.ensure_tool_available(request.tool_name)
         if request.tool_name == "search_tickets":
             ticket_search = TicketSearchArguments.model_validate(request.arguments)
-            return await self.zammad.search_tickets(ticket_search.model_dump(mode="json"))
+            return await self.ticketing.search_tickets(ticket_search.model_dump(mode="json"))
         if request.tool_name == "get_ticket":
             ticket_lookup = TicketArguments.model_validate(request.arguments)
             if not ticket_lookup.ticket_number and not ticket_lookup.external_id:
                 raise ValueError("A ticket number or external ID is required")
-            return await self.zammad.get_ticket(ticket_lookup.model_dump(exclude_none=True))
+            return await self.ticketing.get_ticket(ticket_lookup.model_dump(exclude_none=True))
         if request.tool_name == "get_ticket_counts":
             ticket_counts = TicketCountArguments.model_validate(request.arguments)
-            return await self.zammad.get_ticket_counts(ticket_counts.model_dump(mode="json"))
+            return await self.ticketing.get_ticket_counts(ticket_counts.model_dump(mode="json"))
         if request.tool_name == "get_asset_tickets":
             asset_tickets = AssetTicketArguments.model_validate(request.arguments)
-            return await self.zammad.get_asset_tickets(asset_tickets.model_dump())
+            return await self.ticketing.get_asset_tickets(asset_tickets.model_dump())
         if request.tool_name == "correlate_tickets_with_evidence":
             ticket_correlation = TicketCorrelationArguments.model_validate(request.arguments)
-            return await self.zammad.correlate_tickets_with_evidence(
+            return await self.ticketing.correlate_tickets_with_evidence(
                 ticket_correlation.model_dump(mode="json")
             )
         if request.tool_name == "get_inventory_summary":
@@ -654,7 +784,7 @@ class OperationalToolExecutor:
                     key=lambda item: str(item["observed_at"]),
                     reverse=True,
                 )
-                result = {
+                result: dict[str, Any] = {
                     "match_status": "found",
                     "asset": status,
                     "utilization": utilization,
@@ -676,7 +806,7 @@ class OperationalToolExecutor:
                     },
                 }
                 try:
-                    related_tickets = await self.zammad.get_asset_tickets(
+                    related_tickets = await self.ticketing.get_asset_tickets(
                         {"identifier": asset_arguments.identifier, "recently_closed_days": 30}
                     )
                     result["related_tickets"] = related_tickets
@@ -736,6 +866,22 @@ class OperationalToolExecutor:
                         "open_tickets": [],
                         "recently_closed_tickets": [],
                     }
+                try:
+                    result["servicenow_records"] = await self.servicenow.execute_tool(
+                        "servicenow_get_ci_tickets",
+                        {"identifier": asset_arguments.identifier, "max_depth": 3},
+                    )
+                except ServiceNowError as exc:
+                    result["servicenow_records"] = {
+                        "source": "servicenow",
+                        "availability": {
+                            "enabled": False,
+                            "state": "unavailable",
+                            "error_code": exc.code,
+                            "last_error": str(exc),
+                        },
+                        "records": [],
+                    }
                 return result
             return {"match_status": "found", "utilization": utilization}
         raise ValueError("Unsupported operational tool")
@@ -769,10 +915,56 @@ class OperationalToolWorker:
         )
         if request is None:
             return False
+        started = time.monotonic()
+        integration = (
+            "Local Knowledge Store"
+            if request.tool_name == "knowledge_search"
+            else "Zammad + ServiceNow"
+            if request.tool_name in MULTI_SOURCE_TOOL_NAMES
+            else "ServiceNow"
+            if request.tool_name in SERVICENOW_TOOL_NAMES
+            else "Ticketing"
+            if request.tool_name in TICKETING_TOOL_NAMES
+            or request.tool_name in NORMALIZED_TICKETING_TOOL_NAMES
+            else "Prometheus"
+            if request.tool_name in {"get_asset_status", "get_asset_utilization"}
+            else "Loki"
+            if request.tool_name == "get_asset_log_evidence"
+            else "Inventory"
+        )
+        target_asset = str(request.arguments.get("identifier") or "") or None
+        operations = SqlAlchemyOperationsRepository(self.session)
+        await operations.record_audit_event(
+            "operational_request.started",
+            f"{request.tool_name} request started",
+            target_type="operational_tool_request",
+            target_id=str(request.id),
+            details={
+                "tool_name": request.tool_name,
+                "integration": integration,
+                "target_asset": target_asset,
+            },
+        )
         try:
             result = await OperationalToolExecutor(
                 self.session, self.settings, self.secrets
             ).execute(request)
+            if request.tool_name in NORMALIZED_TICKETING_TOOL_NAMES:
+                provider_results = list(result.get("providers") or [])
+                logger.info(
+                    "ticket_provider_selection tenant_id=%s connector_id=%s request_id=%s "
+                    "intent=%s configured=%s enabled=%s selected=%s tool=%s records=%s stale=%s",
+                    product.tenant_id,
+                    connector_id,
+                    request.id,
+                    request.arguments.get("mode"),
+                    result.get("configured_providers") or [],
+                    result.get("enabled_providers") or [],
+                    result.get("selected_providers") or [],
+                    request.tool_name,
+                    sum(int(item.get("count") or 0) for item in provider_results),
+                    any(bool(item.get("stale")) for item in provider_results),
+                )
             submission = OperationalToolResult(
                 claim_token=request.claim_token,
                 status="completed",
@@ -806,6 +998,20 @@ class OperationalToolWorker:
                 error_code=exc.code,
                 error_message=str(exc)[:500],
             )
+        except ServiceNowError as exc:
+            submission = OperationalToolResult(
+                claim_token=request.claim_token,
+                status="failed",
+                error_code=exc.code,
+                error_message=str(exc)[:500],
+            )
+        except (KnowledgeUnavailableError, KnowledgeIdentityError) as exc:
+            submission = OperationalToolResult(
+                claim_token=request.claim_token,
+                status="failed",
+                error_code="LOCAL_KNOWLEDGE_UNAVAILABLE",
+                error_message=str(exc)[:500],
+            )
         except Exception:
             submission = OperationalToolResult(
                 claim_token=request.claim_token,
@@ -813,23 +1019,63 @@ class OperationalToolWorker:
                 error_code="TOOL_EXECUTION_FAILED",
                 error_message="The connector could not execute the operational tool.",
             )
-        await self.client.submit_operational_tool_result(
-            product.saas_url,
-            connector_id,
-            connector_secret,
-            request.id,
-            submission,
+        try:
+            await self.client.submit_operational_tool_result(
+                product.saas_url,
+                connector_id,
+                connector_secret,
+                request.id,
+                submission,
+            )
+        except Exception:
+            await operations.record_audit_event(
+                "operational_request.failed",
+                f"{request.tool_name} result submission failed",
+                target_type="operational_tool_request",
+                target_id=str(request.id),
+                details={
+                    "tool_name": request.tool_name,
+                    "integration": integration,
+                    "target_asset": target_asset,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                    "result_summary": "The result could not be submitted to PEKA.",
+                    "error_code": "RESULT_SUBMISSION_FAILED",
+                },
+            )
+            raise
+        result = submission.result or {}
+        result_summary = (
+            f"Returned {result.get('count')} records"
+            if result.get("count") is not None
+            else "Request completed"
+            if submission.status == "completed"
+            else submission.error_message or "Request failed"
         )
-        if request.tool_name in {
-            "search_tickets",
-            "get_ticket",
-            "get_ticket_counts",
-            "get_asset_tickets",
-            "correlate_tickets_with_evidence",
-        }:
-            await SqlAlchemyOperationsRepository(self.session).record_event(
-                "zammad.operational_request",
-                f"Zammad operational request {submission.status}",
+        await operations.record_audit_event(
+            "operational_request.succeeded"
+            if submission.status == "completed"
+            else "operational_request.failed",
+            f"{request.tool_name} request {submission.status}",
+            target_type="operational_tool_request",
+            target_id=str(request.id),
+            details={
+                "tool_name": request.tool_name,
+                "integration": integration,
+                "target_asset": target_asset,
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+                "result_summary": result_summary[:500],
+                "error_code": submission.error_code,
+            },
+        )
+        if (
+            request.tool_name in TICKETING_TOOL_NAMES
+            or request.tool_name in SERVICENOW_TOOL_NAMES
+            or request.tool_name in MULTI_SOURCE_TOOL_NAMES
+            or request.tool_name in NORMALIZED_TICKETING_TOOL_NAMES
+        ):
+            await operations.record_event(
+                "ticketing.operational_request",
+                f"Ticketing operational request {submission.status}",
                 target_type="operational_tool_request",
                 target_id=str(request.id),
                 details={
@@ -838,6 +1084,6 @@ class OperationalToolWorker:
                     "error_code": submission.error_code,
                 },
                 level="INFO" if submission.status == "completed" else "ERROR",
-                component="zammad",
+                component="ticketing",
             )
         return True

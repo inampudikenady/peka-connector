@@ -1,11 +1,13 @@
 # Connector release procedure
 
-`PEKA_CONNECTOR_VERSION` is the single release input. The Docker build validates it, writes it
+`VERSION` is the authoritative release value. `PEKA_CONNECTOR_VERSION` is a build input that must
+match it. The Docker build validates the match, writes the value
 into the installed Python package metadata, adds it to the OCI image labels, and exposes that
 same runtime value through health, overview, diagnostics, registration, heartbeat, and document
 delivery metadata. The About page reads the health API rather than maintaining its own version.
 
-The current Milestone 1 release is `0.3.0`. Development builds default to `0.3.0.dev0`.
+The customer-resident data-plane baseline is `1.0.2`. It bundles Qdrant `1.14.1`; the shipped
+component mapping is recorded in `release.json` and exposed by `/api/v1/version`.
 
 Accepted versions use semantic/PEP 440 syntax, including releases such as `0.3.0`, pre-releases
 such as `0.4.0-rc.1` or `0.4.0rc1`, and development builds such as `0.4.0-dev` or
@@ -29,7 +31,7 @@ docker compose config
 Set immutable build identity values, then build the same image used by both Compose services:
 
 ```sh
-export PEKA_CONNECTOR_VERSION=0.3.0
+export PEKA_CONNECTOR_VERSION="$(tr -d '\r\n' < VERSION)"
 export PEKA_BUILD_REVISION="$(git rev-parse HEAD)"
 export PEKA_BUILD_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export PEKA_BUILD_SOURCE="https://example.invalid/peka/peka-connector"

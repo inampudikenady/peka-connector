@@ -22,6 +22,11 @@ from app.application.services.auth import (
 from app.application.services.certificates import CertificateError
 from app.application.services.cmdb import CMDBError
 from app.application.services.documents import DocumentError, ManagedDocumentService
+from app.application.services.knowledge import (
+    KnowledgeIdentityError,
+    KnowledgeUnavailableError,
+    LocalKnowledgeService,
+)
 from app.application.services.loki import LokiError
 from app.application.services.prometheus import PrometheusError
 from app.application.services.saas import (
@@ -29,6 +34,7 @@ from app.application.services.saas import (
     RegistrationStateError,
     SaaSConfigurationError,
 )
+from app.application.services.servicenow import ServiceNowError
 from app.application.services.sources import (
     DisabledSourceError,
     ScanInProgressError,
@@ -90,6 +96,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         CONNECTOR_VERSION,
         settings.environment,
     )
+    logger.info("Local Knowledge Store connecting")
+    async with session_factory() as knowledge_session:
+        knowledge = LocalKnowledgeService(knowledge_session, settings)
+        try:
+            await knowledge.initialize()
+            logger.info("Local Knowledge Store healthy; knowledge collection initialized")
+        except KnowledgeUnavailableError:
+            logger.error("Local Knowledge Store unavailable; live integrations remain available")
     async with session_factory() as session:
         await ManagedDocumentService(session, settings).ensure_managed_source()
         operations = SqlAlchemyOperationsRepository(session)
@@ -128,6 +142,24 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(KnowledgeUnavailableError)
+async def knowledge_unavailable(_: Request, exc: KnowledgeUnavailableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"code": "LOCAL_KNOWLEDGE_UNAVAILABLE", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(KnowledgeIdentityError)
+async def knowledge_identity(_: Request, exc: KnowledgeIdentityError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_403_FORBIDDEN,
+        content={"code": "KNOWLEDGE_SCOPE_REJECTED", "detail": str(exc)},
+    )
+
+
 if settings.cors_origins:
     app.add_middleware(
         CORSMiddleware,
@@ -285,6 +317,14 @@ async def loki_error(_: Request, exc: LokiError) -> JSONResponse:
 
 @app.exception_handler(ZammadError)
 async def zammad_error(_: Request, exc: ZammadError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": str(exc), "detail": str(exc)},
+    )
+
+
+@app.exception_handler(ServiceNowError)
+async def servicenow_error(_: Request, exc: ServiceNowError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.code, "message": str(exc), "detail": str(exc)},

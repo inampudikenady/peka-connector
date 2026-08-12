@@ -3,10 +3,13 @@ import io
 import logging
 import zipfile
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_knowledge_service
 from app.core.config import get_settings
 from app.core.rate_limit import auth_rate_limiter
 from app.core.version import CONNECTOR_VERSION
@@ -54,7 +57,16 @@ def _login(
 def test_runtime_version_is_consistent_across_apis(client: TestClient) -> None:
     health = client.get("/api/v1/health")
     assert health.status_code == 200
-    assert health.json() == {"status": "healthy", "version": CONNECTOR_VERSION}
+    assert health.json()["version"] == CONNECTOR_VERSION
+    assert health.json()["status"] in {"healthy", "degraded"}
+    assert health.json()["components"]["connector"] == {"status": "healthy"}
+    assert "local_knowledge_store" in health.json()["components"]
+    component_versions = client.get("/api/v1/version")
+    assert component_versions.status_code == 200
+    assert component_versions.json() == {
+        "peka_connector": CONNECTOR_VERSION,
+        "components": {"qdrant": "Unknown"},
+    }
 
     _bootstrap(client)
     headers = _login(client)
@@ -63,7 +75,63 @@ def test_runtime_version_is_consistent_across_apis(client: TestClient) -> None:
     assert overview.status_code == 200
     assert diagnostics.status_code == 200
     assert overview.json()["connector_version"] == CONNECTOR_VERSION
+    assert overview.json()["peka_connector"] == "1.0.2"
+    assert overview.json()["components"]["qdrant"] == "Unknown"
+    assert overview.json()["knowledge_store"]["status"] == "unavailable"
     assert diagnostics.json()["version"] == CONNECTOR_VERSION
+
+
+def test_overview_exposes_structured_healthy_knowledge_store(client: TestClient) -> None:
+    indexed_at = datetime(2026, 8, 12, 12, tzinfo=UTC)
+    searched_at = datetime(2026, 8, 12, 12, 5, tzinfo=UTC)
+
+    class FakeKnowledgeService:
+        settings = SimpleNamespace(qdrant_collection="peka_documents")
+
+        async def stats(self):
+            return SimpleNamespace(
+                qdrant_reachable=True,
+                collection_available=True,
+                statistics_readable=True,
+                search_operational=True,
+                engine_version="runtime-version",
+                document_count=1,
+                indexed_chunk_count=2,
+                pending_count=0,
+                failed_count=0,
+                last_index_activity=indexed_at,
+                last_search_at=searched_at,
+            )
+
+    app.dependency_overrides[get_knowledge_service] = lambda: FakeKnowledgeService()
+    try:
+        _bootstrap(client)
+        response = client.get("/api/v1/overview", headers=_login(client))
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["peka_connector"] == "1.0.2"
+        assert payload["components"] == {"qdrant": "runtime-version"}
+        assert payload["knowledge_store"] == {
+            "status": "healthy",
+            "engine": "qdrant",
+            "engine_version": "runtime-version",
+            "collection": "peka_documents",
+            "documents": 1,
+            "chunks": 2,
+            "pending": 0,
+            "failed": 0,
+            "last_indexed_at": "2026-08-12T12:00:00Z",
+            "last_search_at": "2026-08-12T12:05:00Z",
+            "checks": {
+                "qdrant_reachable": True,
+                "collection_exists": True,
+                "collection_accessible": True,
+                "statistics_readable": True,
+                "search_service_operational": True,
+            },
+        }
+    finally:
+        app.dependency_overrides.pop(get_knowledge_service, None)
 
 
 def test_startup_log_includes_runtime_version(caplog: pytest.LogCaptureFixture) -> None:

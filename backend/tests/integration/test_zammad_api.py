@@ -79,7 +79,7 @@ def test_zammad_configuration_api_never_returns_token_and_exposes_actions(
     assert tested.status_code == 200
     assert tested.json()["readable_ticket_count"] == 1
 
-    async def synchronize(_service, _configuration_id):
+    async def synchronize(_service, _configuration_id, **_kwargs):
         return {
             "ticket_count": 2,
             "article_count": 5,

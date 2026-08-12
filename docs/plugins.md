@@ -20,7 +20,7 @@ Discovery does not follow symlinks. It reads included file bytes only to calcula
 
 Enabled sources receive one UTC interval job. Create/update reconciles the interval, disable/delete removes it, and startup rebuilds jobs. Manual and scheduled runs share discovery/reconciliation; history identifies the trigger and overlapping runs are skipped.
 
-Future Prometheus, Loki, Zammad, ServiceNow, SharePoint, Confluence, and Jira packages can reuse registration and orchestration, but remain absent from the UI until implemented and tested. Non-document sources should introduce suitable domain records rather than forcing all data into document metadata.
+Future SharePoint, Confluence, and Jira packages can reuse registration and orchestration, but remain absent from the UI until implemented and tested. Prometheus, Loki, Zammad, and ServiceNow use dedicated domain records and configuration surfaces rather than forcing non-document data into document metadata.
 
 ## Built-in managed documents
 

@@ -3,7 +3,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
-from app.api.dependencies import Administrator, CurrentUser, DocumentServiceDep, OperationsDep
+from app.api.dependencies import (
+    Administrator,
+    CurrentUser,
+    DocumentServiceDep,
+    KnowledgeServiceDep,
+    OperationsDep,
+)
 from app.api.schemas import (
     DocumentUploadBatchResponse,
     DocumentUploadResult,
@@ -14,6 +20,10 @@ from app.api.schemas import (
     PaginatedManagedDocumentsResponse,
 )
 from app.application.services.documents import DocumentError
+from app.application.services.knowledge import (
+    KnowledgeIdentityError,
+    KnowledgeUnavailableError,
+)
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.scheduling import connector_scheduler
 
@@ -167,6 +177,7 @@ async def get_document(
 async def upload_documents(
     _: Administrator,
     service: DocumentServiceDep,
+    knowledge: KnowledgeServiceDep,
     files: Annotated[list[UploadFile], File()],
 ) -> DocumentUploadBatchResponse:
     if len(files) > service.max_files_per_request:
@@ -180,6 +191,11 @@ async def upload_documents(
     for upload in files:
         try:
             document = await service.upload(upload, batch_bytes)
+            try:
+                await knowledge.index_document(document)
+            except Exception:
+                # The durable local file remains queued for the background knowledge worker.
+                pass
             await service.prepare_for_response([document])
             batch_bytes += document.size_bytes
             results.append(
@@ -187,7 +203,7 @@ async def upload_documents(
                     filename=document.filename,
                     success=True,
                     document=ManagedDocumentResponse.model_validate(document),
-                    message="Document was stored and queued for PEKA delivery.",
+                    message="Document was stored and queued for local indexing.",
                 )
             )
         except DocumentError as exc:
@@ -205,15 +221,27 @@ async def upload_documents(
 
 @router.post("/{document_id}/retry", status_code=status.HTTP_202_ACCEPTED)
 async def retry_document(
-    document_id: UUID, _: Administrator, service: DocumentServiceDep
+    document_id: UUID,
+    _: Administrator,
+    service: DocumentServiceDep,
+    knowledge: KnowledgeServiceDep,
 ) -> dict[str, str]:
-    await service.retry(document_id)
-    return {"message": "Document delivery was queued for retry."}
+    document = await service.retry(document_id)
+    await knowledge.index_document(document)
+    return {"message": "Document local indexing was retried."}
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
-    document_id: UUID, _: Administrator, service: DocumentServiceDep
+    document_id: UUID,
+    _: Administrator,
+    service: DocumentServiceDep,
+    knowledge: KnowledgeServiceDep,
 ) -> Response:
     await service.delete(document_id)
+    try:
+        await knowledge.delete_document(document_id)
+    except (KnowledgeUnavailableError, KnowledgeIdentityError):
+        # The durable DELETE_PENDING marker is retried by the local knowledge worker.
+        pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
