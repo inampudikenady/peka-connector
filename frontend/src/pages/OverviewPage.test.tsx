@@ -19,7 +19,7 @@ function store(overrides: Partial<KnowledgeStoreOverview> = {}): KnowledgeStoreO
 
 describe('Local Knowledge Store overview card', () => {
   it('shows runtime component and authoritative indexing statistics', () => {
-    const html = renderToStaticMarkup(<KnowledgeStoreCard store={store()} />);
+    const html = renderToStaticMarkup(<KnowledgeStoreCard store={store()} onRefresh={() => undefined} />);
     expect(html).toContain('Local Knowledge Store');
     expect(html).toContain('Qdrant runtime-1.14.1');
     expect(html).toContain('peka_documents');
@@ -30,6 +30,17 @@ describe('Local Knowledge Store overview card', () => {
     expect(html).not.toContain('Last indexed:');
     expect(html).not.toContain('Last search:');
     expect(html.match(/>Never</g)).toHaveLength(2);
+    expect(html).toContain('aria-label="Refresh knowledge store"');
+  });
+
+  it('keeps statistics visible and disables refresh while a request is pending', () => {
+    const html = renderToStaticMarkup(
+      <KnowledgeStoreCard store={store({ documents: 0, chunks: 0 })} refreshing onRefresh={() => undefined} />,
+    );
+    expect(html).toContain('aria-label="Refresh knowledge store"');
+    expect(html).toContain('disabled=""');
+    expect(html).toContain('Documents');
+    expect(html).toContain('Chunks');
   });
 
   it('renders unavailable runtime details safely', () => {

@@ -5,12 +5,14 @@ import {
 
 import { api } from '../api/client';
 import type { Overview } from '../api/types';
+import { createRefreshAction } from '../utils/createRefreshAction';
 import { useToast } from './ToastProvider';
 
 interface ConnectorStatusContextValue {
   data: Overview | null;
   error: string;
   loading: boolean;
+  refreshing: boolean;
   retrying: boolean;
   refresh: () => Promise<void>;
   retryHeartbeat: () => Promise<void>;
@@ -23,19 +25,19 @@ export function ConnectorStatusProvider({ children }: PropsWithChildren) {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const retryInFlight = useRef(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      setData(await api.overview());
-      setError('');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Connector status could not be loaded.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const refresh = useMemo(() => createRefreshAction({
+    load: api.overview,
+    onStart: () => setRefreshing(true),
+    onSuccess: (overview) => { setData(overview); setError(''); },
+    onError: (reason) => setError(
+      reason instanceof Error ? reason.message : 'Connector status could not be loaded.',
+    ),
+    onSettled: () => { setLoading(false); setRefreshing(false); },
+  }), []);
 
   const retryHeartbeat = useCallback(async () => {
     if (retryInFlight.current) return;
@@ -58,8 +60,8 @@ export function ConnectorStatusProvider({ children }: PropsWithChildren) {
 
   useEffect(() => { void refresh(); }, [refresh]);
   const value = useMemo(
-    () => ({ data, error, loading, retrying, refresh, retryHeartbeat }),
-    [data, error, loading, retrying, refresh, retryHeartbeat],
+    () => ({ data, error, loading, refreshing, retrying, refresh, retryHeartbeat }),
+    [data, error, loading, refreshing, retrying, refresh, retryHeartbeat],
   );
   return <ConnectorStatusContext.Provider value={value}>{children}</ConnectorStatusContext.Provider>;
 }

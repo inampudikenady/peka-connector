@@ -5,6 +5,7 @@ from uuid import uuid4
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.integration_catalog import INTEGRATION_CATALOG
 from app.core.logging import sanitize
 from app.domain.entities.source import UserAccount
 from app.domain.services.connector_status import derive_connection_state
@@ -16,6 +17,29 @@ from app.infrastructure.database.models.operations import (
     ProductSettingsModel,
 )
 from app.infrastructure.database.models.source import SourceModel
+
+EXTERNAL_INTEGRATION_TYPES = frozenset(
+    str(item["integration_type"])
+    for item in INTEGRATION_CATALOG
+    if "knowledge" not in item.get("provider_roles", ())
+)
+
+
+def summarize_external_integrations(
+    integrations: list[ConnectorIntegrationModel],
+) -> dict[str, int]:
+    """Summarize enabled customer integrations using the shared catalog boundary."""
+    enabled = [
+        item
+        for item in integrations
+        if item.enabled and item.integration_type in EXTERNAL_INTEGRATION_TYPES
+    ]
+    healthy = sum(item.status == "healthy" for item in enabled)
+    return {
+        "enabled": len(enabled),
+        "healthy": healthy,
+        "attention": len(enabled) - healthy,
+    }
 
 
 class SqlAlchemyOperationsRepository:
@@ -441,12 +465,25 @@ class SqlAlchemyOperationsRepository:
         recent_events = await self._session.scalars(
             select(AuditEventModel).order_by(AuditEventModel.created_at.desc()).limit(12)
         )
-        integrations = list((await self._session.scalars(select(ConnectorIntegrationModel))).all())
+        connector_id = str(settings.connector_id or settings.instance_id or "local")
+        integrations = list(
+            (
+                await self._session.scalars(
+                    select(ConnectorIntegrationModel).where(
+                        ConnectorIntegrationModel.connector_id == connector_id,
+                        ConnectorIntegrationModel.integration_type.in_(EXTERNAL_INTEGRATION_TYPES),
+                    )
+                )
+            ).all()
+        )
+        integration_summary = summarize_external_integrations(integrations)
+        external_integration_ids = [str(item.id) for item in integrations]
         recent_integration_failures = await self._session.scalars(
             select(AuditEventModel)
             .where(
                 AuditEventModel.target_type == "integration",
                 AuditEventModel.event_type.contains("failed"),
+                AuditEventModel.target_id.in_(external_integration_ids),
             )
             .order_by(AuditEventModel.created_at.desc())
             .limit(5)
@@ -488,14 +525,9 @@ class SqlAlchemyOperationsRepository:
             "enabled_source_count": enabled_count,
             "unhealthy_source_count": unhealthy_count,
             "recent_events": list(recent_events.all()),
-            "enabled_integration_count": sum(item.enabled for item in integrations),
-            "healthy_integration_count": sum(
-                item.enabled and item.status == "healthy" for item in integrations
-            ),
-            "attention_integration_count": sum(
-                item.enabled and item.status not in {"healthy", "configured"}
-                for item in integrations
-            ),
+            "enabled_integration_count": integration_summary["enabled"],
+            "healthy_integration_count": integration_summary["healthy"],
+            "attention_integration_count": integration_summary["attention"],
             "recent_integration_failures": list(recent_integration_failures.all()),
             "document_total": len(documents),
             "document_queued": sum(

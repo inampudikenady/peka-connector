@@ -59,6 +59,17 @@ describe('consolidated connector administration UI', () => {
     expect(headerSource).toContain('<Tooltip title="User menu"');
   });
 
+  it('refreshes authoritative status whenever the Overview route is entered', () => {
+    expect(overviewSource).toContain('refreshing, retrying, refresh, retryHeartbeat');
+    expect(overviewSource).toContain('useEffect(() => { void refresh(); }, [refresh])');
+  });
+
+  it('uses the guarded shared refresh for the Knowledge Store card', () => {
+    expect(overviewSource).toContain('aria-label="Refresh knowledge store"');
+    expect(overviewSource).toContain('disabled={refreshing}');
+    expect(overviewSource).toContain("user?.role === 'administrator' ? () => void refresh()");
+  });
+
   it('prevents unsupported adapter enablement and preserves catalog controls', () => {
     expect(integrationsSource).toContain('Adapter unavailable');
     expect(integrationsSource).toContain('<Button size="small" disabled>Coming soon</Button>');

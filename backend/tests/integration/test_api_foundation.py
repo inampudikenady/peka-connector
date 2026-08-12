@@ -130,6 +130,9 @@ def test_overview_exposes_structured_healthy_knowledge_store(client: TestClient)
                 "search_service_operational": True,
             },
         }
+        assert payload["enabled_integration_count"] == 0
+        assert payload["healthy_integration_count"] == 0
+        assert payload["attention_integration_count"] == 0
     finally:
         app.dependency_overrides.pop(get_knowledge_service, None)
 
