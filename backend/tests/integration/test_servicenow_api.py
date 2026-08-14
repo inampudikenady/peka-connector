@@ -7,12 +7,16 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app.application.services.integrations import IntegrationService
 from app.application.services.servicenow import ServiceNowClient, ServiceNowService
 from app.application.services.ticketing import TicketingProviderService
 from app.core.config import get_settings
 from app.core.rate_limit import auth_rate_limiter
 from app.infrastructure.database.base import Base
-from app.infrastructure.database.models.integration import ConnectorIntegrationModel
+from app.infrastructure.database.models.integration import (
+    ConnectorIntegrationModel,
+    IntegrationStreamActivationModel,
+)
 from app.infrastructure.database.models.servicenow import (
     ServiceNowCIModel,
     ServiceNowConfigurationModel,
@@ -146,7 +150,12 @@ def test_servicenow_sync_is_idempotent_correlated_and_stage_cursor_scoped(
                 "name": "UTIL001",
                 "fqdn": "util001.demo.internal",
                 "ip_address": "172.16.165.12",
-                "install_status": "1",
+                "os": {"value": "linux", "display_value": "Red Hat Enterprise Linux"},
+                "environment": {"value": "prod", "display_value": "Production"},
+                "application": {"value": "app-1", "display_value": "Payments"},
+                "owned_by": {"value": "user-1", "display_value": "Pat Owner"},
+                "support_group": {"value": "group-1", "display_value": "Linux Support"},
+                "install_status": {"value": "1", "display_value": "Installed"},
                 "sys_updated_on": "2026-08-04 10:00:00",
             }
         ]
@@ -316,6 +325,12 @@ def test_servicenow_sync_is_idempotent_correlated_and_stage_cursor_scoped(
             ).search_enabled_records(
                 {"mode": "search", "state": "open", "query": "", "providers": [], "limit": 50}
             )
+            await IntegrationService(session, encryption).select_source(
+                zammad_integration.id,
+                "ticketing",
+                confirmed=True,
+                actor="test",
+            )
             servicenow_configuration.enabled = False
             servicenow_integration = await session.get(
                 ConnectorIntegrationModel, servicenow_configuration.integration_id
@@ -375,16 +390,40 @@ def test_servicenow_sync_is_idempotent_correlated_and_stage_cursor_scoped(
     assert len(graph["relationships"]) == 2
     assert incident["incident"]["correlation_method"] == "cmdb_ci_sys_id"
     assert incident["incident"]["latest_update"] == "Operator reduced memory pressure"
+    cmdb = client.get(
+        f"/api/v1/servicenow/configurations/{created['id']}/cmdb",
+        headers=auth_headers,
+    )
+    assert cmdb.status_code == 200, cmdb.text
+    assert cmdb.json()["relationship_count"] == 2
+    assert cmdb.json()["items"] == [
+        {
+            "id": cmdb.json()["items"][0]["id"],
+            "ci_name": "UTIL001",
+            "ci_class": "cmdb_ci_linux_server",
+            "fqdn": "util001.demo.internal",
+            "ip_address": "172.16.165.12",
+            "operating_system": "Red Hat Enterprise Linux",
+            "environment": "Production",
+            "application": "Payments",
+            "business_owner": "Pat Owner",
+            "support_group": "Linux Support",
+            "lifecycle_state": "Installed",
+            "updated_at": "2026-08-04T10:00:00Z",
+            "source": "ServiceNow CMDB",
+        }
+    ]
     assert provider_result["configured_providers"] == ["zammad", "servicenow"]
     assert provider_result["enabled_providers"] == ["servicenow"]
     assert provider_result["selected_providers"] == ["servicenow"]
-    assert provider_result["providers"][0]["count"] == 1
-    assert both_enabled["enabled_providers"] == ["zammad", "servicenow"]
-    assert both_enabled["selected_providers"] == ["zammad", "servicenow"]
+    assert provider_result["providers"][0]["count"] == 3
+    # Runtime configuration flags cannot bypass the selected Ticketing source.
+    assert both_enabled["enabled_providers"] == ["servicenow"]
+    assert both_enabled["selected_providers"] == ["servicenow"]
     assert zammad_only["enabled_providers"] == ["zammad"]
     assert zammad_only["selected_providers"] == ["zammad"]
-    assert both_disabled["enabled_providers"] == []
-    assert both_disabled["providers"] == []
+    assert both_disabled["enabled_providers"] == ["zammad"]
+    assert both_disabled["selected_providers"] == ["zammad"]
 
 
 def test_failed_stage_does_not_advance_its_cursor_or_rollback_other_stages(
@@ -434,3 +473,143 @@ def test_failed_stage_does_not_advance_its_cursor_or_rollback_other_stages(
     assert rows["incidents"].last_error is None
     assert rows["changes"].cursor_at is None
     assert "denied change_request" in rows["changes"].last_error
+
+
+def test_servicenow_sync_respects_independent_selected_capabilities(
+    client: TestClient, monkeypatch
+) -> None:
+    auth_headers = headers(client)
+    created = client.post(
+        "/api/v1/servicenow/configurations",
+        headers=auth_headers,
+        json={
+            "instance_url": "https://instance.service-now.com",
+            "username": "api-reader",
+            "password": "service-now-capability-test",
+        },
+    ).json()
+    calls: list[str] = []
+
+    async def configuration_items(_client, _after=None):
+        calls.append("configuration_items")
+        return []
+
+    async def relationships(_client, _after=None):
+        calls.append("relationships")
+        return []
+
+    async def incidents(_client, _after=None):
+        calls.append("incidents")
+        return []
+
+    async def problems(_client, _after=None):
+        calls.append("problems")
+        return []
+
+    async def changes(_client, _after=None):
+        calls.append("changes")
+        return []
+
+    monkeypatch.setattr(ServiceNowClient, "list_configuration_items", configuration_items)
+    monkeypatch.setattr(ServiceNowClient, "list_ci_relationships", relationships)
+    monkeypatch.setattr(ServiceNowClient, "list_incidents", incidents)
+    monkeypatch.setattr(ServiceNowClient, "list_problems", problems)
+    monkeypatch.setattr(ServiceNowClient, "list_changes", changes)
+
+    async def select_only(stream: str) -> None:
+        async with session_factory() as session:
+            configuration = await session.get(ServiceNowConfigurationModel, UUID(created["id"]))
+            assert configuration is not None
+            activations = list(
+                (
+                    await session.scalars(
+                        select(IntegrationStreamActivationModel).where(
+                            IntegrationStreamActivationModel.integration_id
+                            == configuration.integration_id
+                        )
+                    )
+                ).all()
+            )
+            assert {activation.stream for activation in activations} == {"ticketing", "cmdb"}
+            for activation in activations:
+                activation.enabled = activation.stream == stream
+                activation.active = activation.stream == stream
+            configuration.enabled = True
+            await session.commit()
+
+    asyncio.run(select_only("cmdb"))
+    cmdb_sync = client.post(
+        f"/api/v1/servicenow/configurations/{created['id']}/sync", headers=auth_headers
+    )
+    assert cmdb_sync.status_code == 200, cmdb_sync.text
+    assert cmdb_sync.json()["selected_capabilities"] == ["cmdb"]
+    assert calls == ["configuration_items", "relationships"]
+
+    calls.clear()
+    asyncio.run(select_only("ticketing"))
+    ticketing_sync = client.post(
+        f"/api/v1/servicenow/configurations/{created['id']}/sync", headers=auth_headers
+    )
+    assert ticketing_sync.status_code == 200, ticketing_sync.text
+    assert ticketing_sync.json()["selected_capabilities"] == ["ticketing"]
+    assert calls == ["incidents", "problems", "changes"]
+
+
+def test_cmdb_records_endpoint_rejects_another_connector_configuration(
+    client: TestClient,
+) -> None:
+    auth_headers = headers(client)
+
+    async def create_other_connector_configuration() -> UUID:
+        async with session_factory() as session:
+            integration = ConnectorIntegrationModel(
+                connector_id="other-connector",
+                integration_type="servicenow",
+                display_name="Other ServiceNow",
+                category="Ticketing / CMDB",
+                enabled=True,
+                status="healthy",
+                capabilities_json={"cmdb": True, "incidents": True},
+            )
+            session.add(integration)
+            await session.flush()
+            configuration = ServiceNowConfigurationModel(
+                integration_id=integration.id,
+                instance_url="https://other.service-now.com",
+                username="api-reader",
+                encrypted_password="not-read-by-this-endpoint",
+                enabled=True,
+            )
+            session.add(configuration)
+            await session.commit()
+            return configuration.id
+
+    other_id = asyncio.run(create_other_connector_configuration())
+    response = client.get(
+        f"/api/v1/servicenow/configurations/{other_id}/cmdb",
+        headers=auth_headers,
+    )
+    assert response.status_code == 404
+
+
+def test_cmdb_records_endpoint_returns_empty_state_before_first_sync(
+    client: TestClient,
+) -> None:
+    auth_headers = headers(client)
+    created = client.post(
+        "/api/v1/servicenow/configurations",
+        headers=auth_headers,
+        json={
+            "instance_url": "https://instance.service-now.com",
+            "username": "api-reader",
+            "password": "service-now-empty-state-secret",
+        },
+    )
+    assert created.status_code == 201
+    response = client.get(
+        f"/api/v1/servicenow/configurations/{created.json()['id']}/cmdb",
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert response.json()["total_cis"] == 0

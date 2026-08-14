@@ -10,8 +10,10 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.cmdb_sources import CMDBSourceService
 from app.application.services.inventory import InventoryService
 from app.application.services.knowledge import (
     KnowledgeIdentityError,
@@ -42,6 +44,7 @@ class _Arguments(BaseModel):
 
 class CountArguments(_Arguments):
     os_family: str | None = Field(default=None, max_length=100)
+    asset_class: Literal["server"] | None = None
 
 
 class SearchArguments(_Arguments):
@@ -50,6 +53,7 @@ class SearchArguments(_Arguments):
     environment: str | None = Field(default=None, max_length=255)
     missing_prometheus: bool | None = None
     prometheus_health: Literal["healthy", "unhealthy"] | None = None
+    asset_class: Literal["server"] | None = None
     limit: int = Field(default=25, ge=1, le=50)
 
 
@@ -83,6 +87,11 @@ class LogEvidenceArguments(AssetArguments):
 
 class EmptyArguments(_Arguments):
     pass
+
+
+class InfrastructureAssessmentArguments(_Arguments):
+    limit: int = Field(default=50, ge=1, le=50)
+    lookback_hours: Literal[1, 6, 24, 72, 168, 720] = 24
 
 
 class KnowledgeSearchArguments(_Arguments):
@@ -168,6 +177,9 @@ class NormalizedTicketingArguments(_Arguments):
     query: str | None = Field(default=None, max_length=1000)
     identifier: str | None = Field(default=None, max_length=500)
     providers: list[Literal["zammad", "servicenow"]] = Field(default_factory=list, max_length=2)
+    record_types: list[Literal["incident", "problem", "change"]] = Field(
+        default_factory=list, max_length=3
+    )
     limit: int = Field(default=50, ge=1, le=50)
     updated_from: datetime | None = None
 
@@ -334,12 +346,12 @@ def _health_assessment(
     for item in log_evidence.get("evidence") or []:
         if not isinstance(item, dict):
             continue
-        key = (item.get("observed_at"), item.get("summary"))
-        current = events_by_occurrence.get(key)
+        occurrence_key = (item.get("observed_at"), item.get("summary"))
+        current = events_by_occurrence.get(occurrence_key)
         if current is None or category_priority.get(
             str(item.get("category")), 100
         ) < category_priority.get(str(current.get("category")), 100):
-            events_by_occurrence[key] = item
+            events_by_occurrence[occurrence_key] = item
     raw_events = list(events_by_occurrence.values())
     metric_time = _as_datetime(utilization.get("metric_timestamp")) or datetime.now(UTC)
     relevant_events: list[dict[str, Any]] = []
@@ -355,6 +367,7 @@ def _health_assessment(
         enriched["impact_classification"] = impact
         enriched["impact_reason"] = impact_reason
         if temporally_aligned and impact != "routine_system_event":
+            assert age_seconds is not None
             enriched["relevance"] = "observation"
             enriched["relevance_reason"] = (
                 f"Observed {age_seconds / 60:.0f} minutes from the latest metrics snapshot; "
@@ -584,6 +597,7 @@ class OperationalToolExecutor:
     ) -> None:
         self.session = session
         self.inventory = InventoryService(session)
+        self.cmdb = CMDBSourceService(session, secrets)
         self.prometheus = PrometheusService(session, secrets, settings)
         self.loki = LokiService(session, secrets, settings)
         self.ticketing = TicketingProviderService(session, secrets)
@@ -592,6 +606,7 @@ class OperationalToolExecutor:
 
     async def execute(self, request: OperationalToolRequest) -> dict[str, Any]:
         if request.tool_name == "knowledge_search":
+            await self._require_source("knowledge", "documents")
             knowledge_arguments = KnowledgeSearchArguments.model_validate(request.arguments)
             results = await self.knowledge.search(
                 knowledge_arguments.query,
@@ -618,26 +633,15 @@ class OperationalToolExecutor:
             return await self.ticketing.search_enabled_records(arguments)
         if request.tool_name in MULTI_SOURCE_TOOL_NAMES:
             arguments = AssetArguments.model_validate(request.arguments).model_dump()
-            sources: dict[str, Any] = {}
-            try:
-                sources["zammad"] = await self.ticketing.zammad.get_asset_tickets(arguments)
-            except ZammadError as exc:
-                sources["zammad"] = {
-                    "available": False,
-                    "error_code": exc.code,
-                    "error_message": str(exc),
+            return await self.ticketing.search_enabled_records(
+                {
+                    "mode": "asset",
+                    "state": "all",
+                    "identifier": arguments["identifier"],
+                    "providers": [],
+                    "limit": 50,
                 }
-            try:
-                sources["servicenow"] = await self.servicenow.execute_tool(
-                    "servicenow_get_ci_tickets", arguments
-                )
-            except ServiceNowError as exc:
-                sources["servicenow"] = {
-                    "available": False,
-                    "error_code": exc.code,
-                    "error_message": str(exc),
-                }
-            return {"identifier": arguments["identifier"], "sources": sources}
+            )
         if request.tool_name in SERVICENOW_TOOL_NAMES:
             if request.tool_name == "servicenow_get_status":
                 arguments = EmptyArguments.model_validate(request.arguments).model_dump()
@@ -656,6 +660,15 @@ class OperationalToolExecutor:
                 arguments = ServiceNowCIArguments.model_validate(request.arguments).model_dump()
             else:
                 arguments = ServiceNowSearchArguments.model_validate(request.arguments).model_dump()
+            if request.tool_name != "servicenow_get_status":
+                stream = (
+                    "cmdb"
+                    if request.tool_name
+                    in {"servicenow_get_ci", "servicenow_get_ci_relationships"}
+                    else "ticketing"
+                )
+                source_key = "servicenow_cmdb" if stream == "cmdb" else "servicenow"
+                await self._require_source(stream, source_key)
             return await self.servicenow.execute_tool(request.tool_name, arguments)
         if request.tool_name in TICKETING_TOOL_NAMES:
             await self.ticketing.ensure_tool_available(request.tool_name)
@@ -680,18 +693,47 @@ class OperationalToolExecutor:
             )
         if request.tool_name == "get_inventory_summary":
             EmptyArguments.model_validate(request.arguments)
-            return await self.inventory.inventory_summary()
+            return await self.cmdb.inventory_summary()
         if request.tool_name == "count_assets":
             count_arguments = CountArguments.model_validate(request.arguments)
-            return await self.inventory.count_assets(count_arguments.os_family)
+            return await self.cmdb.count_assets(
+                count_arguments.os_family, count_arguments.asset_class
+            )
         if request.tool_name == "search_assets":
             search_arguments = SearchArguments.model_validate(request.arguments)
-            assets = await self.inventory.find_assets(**search_arguments.model_dump())
+            assets = await self.cmdb.search_assets(**search_arguments.model_dump())
             return {
                 "match_status": "found" if assets else "not_found",
                 "assets": assets,
                 "count": len(assets),
+                "source": await self.cmdb.active_source_key(),
             }
+        if request.tool_name == "get_asset_relationships":
+            asset_arguments = AssetArguments.model_validate(request.arguments)
+            matches = await self.cmdb.search_assets(identifier=asset_arguments.identifier, limit=20)
+            if not matches:
+                return {
+                    "match_status": "not_found",
+                    "identifier": asset_arguments.identifier,
+                    "candidates": [],
+                }
+            if len(matches) > 1:
+                return {
+                    "match_status": "ambiguous",
+                    "identifier": asset_arguments.identifier,
+                    "candidates": matches,
+                }
+            relationships = await self.cmdb.asset_relationships(matches[0])
+            return {
+                "match_status": "found",
+                "asset": matches[0],
+                "relationships": relationships or {},
+            }
+        if request.tool_name == "assess_infrastructure":
+            assessment_arguments = InfrastructureAssessmentArguments.model_validate(
+                request.arguments
+            )
+            return await self._assess_infrastructure(assessment_arguments)
         if request.tool_name in {
             "get_asset_details",
             "get_asset_status",
@@ -713,7 +755,7 @@ class OperationalToolExecutor:
                 or status_arguments
                 or AssetArguments.model_validate(request.arguments)
             )
-            matches = await self.inventory.find_assets(
+            matches = await self.cmdb.search_assets(
                 identifier=asset_arguments.identifier, limit=20
             )
             if not matches:
@@ -734,6 +776,42 @@ class OperationalToolExecutor:
             asset_id = UUID(asset["id"])
             model = await self.session.get(InventoryAssetModel, asset_id)
             if model is None:
+                if request.tool_name == "get_asset_status":
+                    related = await self.ticketing.get_asset_tickets(
+                        {
+                            "identifier": asset_arguments.identifier,
+                            "recently_closed_days": 30,
+                        }
+                    )
+                    return {
+                        "match_status": "found",
+                        "asset": asset,
+                        "utilization": {
+                            "error_code": "PROMETHEUS_TARGET_NOT_FOUND",
+                            "unavailable_reason": (
+                                "The active CMDB CI has no correlated Prometheus inventory target."
+                            ),
+                        },
+                        "log_evidence": {
+                            "available": False,
+                            "error_code": "LOKI_STREAM_NOT_FOUND",
+                            "unavailable_reason": (
+                                "The active CMDB CI has no correlated Loki stream."
+                            ),
+                            "evidence": [],
+                        },
+                        "timeline": [],
+                        "assessment": {
+                            "overall_health": "unknown",
+                            "conclusion": (
+                                "No monitoring correlation was found for the active CMDB CI."
+                            ),
+                            "evidence": [],
+                            "recommendations": [],
+                        },
+                        "related_tickets": related,
+                        "source_timings_ms": {},
+                    }
                 return {
                     "match_status": "not_found",
                     "identifier": asset_arguments.identifier,
@@ -741,7 +819,10 @@ class OperationalToolExecutor:
                 }
             if request.tool_name == "get_asset_log_evidence":
                 assert log_arguments is not None
-                categories = [log_arguments.category] if log_arguments.category else None
+                await self._require_source("logs", "loki")
+                categories: list[str] | None = (
+                    [log_arguments.category] if log_arguments.category else None
+                )
                 evidence = await self.loki.asset_evidence(
                     model,
                     lookback_hours=log_arguments.lookback_hours,
@@ -753,11 +834,17 @@ class OperationalToolExecutor:
                     "asset": asset,
                     "log_evidence": evidence,
                 }
+            source_timings: dict[str, float] = {}
+            source_started = time.monotonic()
+            await self._require_source("monitoring", "prometheus")
             utilization = await self.prometheus.asset_utilization(model)
+            source_timings["monitoring"] = round((time.monotonic() - source_started) * 1000, 1)
             if request.tool_name == "get_asset_status":
                 status = await self.inventory.operational_asset_status(asset_id)
                 assert status is not None
                 try:
+                    source_started = time.monotonic()
+                    await self._require_source("logs", "loki")
                     logs = await self.loki.asset_evidence(model, limit_per_category=2)
                 except LokiError as exc:
                     logs = {
@@ -769,6 +856,8 @@ class OperationalToolExecutor:
                         "counts_by_category": {},
                         "last_log_at": None,
                     }
+                finally:
+                    source_timings["logs"] = round((time.monotonic() - source_started) * 1000, 1)
                 timeline = [
                     {
                         "source": "prometheus",
@@ -787,6 +876,9 @@ class OperationalToolExecutor:
                 result: dict[str, Any] = {
                     "match_status": "found",
                     "asset": status,
+                    "inventory_relationships": (
+                        await self.inventory.asset_relationships(asset_id) or {}
+                    ),
                     "utilization": utilization,
                     "log_evidence": logs,
                     "timeline": timeline,
@@ -804,8 +896,10 @@ class OperationalToolExecutor:
                         "metrics": "prometheus",
                         "logs": "loki",
                     },
+                    "source_timings_ms": source_timings,
                 }
                 try:
+                    source_started = time.monotonic()
                     related_tickets = await self.ticketing.get_asset_tickets(
                         {"identifier": asset_arguments.identifier, "recently_closed_days": 30}
                     )
@@ -866,25 +960,180 @@ class OperationalToolExecutor:
                         "open_tickets": [],
                         "recently_closed_tickets": [],
                     }
-                try:
-                    result["servicenow_records"] = await self.servicenow.execute_tool(
-                        "servicenow_get_ci_tickets",
-                        {"identifier": asset_arguments.identifier, "max_depth": 3},
+                finally:
+                    source_timings["ticketing"] = round(
+                        (time.monotonic() - source_started) * 1000, 1
                     )
-                except ServiceNowError as exc:
-                    result["servicenow_records"] = {
-                        "source": "servicenow",
-                        "availability": {
-                            "enabled": False,
-                            "state": "unavailable",
-                            "error_code": exc.code,
-                            "last_error": str(exc),
-                        },
-                        "records": [],
-                    }
                 return result
             return {"match_status": "found", "utilization": utilization}
         raise ValueError("Unsupported operational tool")
+
+    async def _require_source(self, stream: str, source_key: str) -> None:
+        await self.ticketing.integrations.bootstrap_legacy_integrations()
+        active = await self.ticketing.integrations.active_source(stream)
+        if active is None:
+            streams = await self.ticketing.integrations.stream_sources()
+            stream_state = next(item for item in streams if item["stream"] == stream)
+            if not stream_state["sources"]:
+                # Compatibility for isolated pre-v2 databases and unit fixtures. A
+                # migrated/configured tenant always has authoritative source rows.
+                return
+        if active is None or active.source_key != source_key:
+            raise ValueError(f"No active {stream.title()} source is configured.")
+
+    async def _assess_infrastructure(
+        self, arguments: InfrastructureAssessmentArguments
+    ) -> dict[str, Any]:
+        """Build a partial-evidence-tolerant, CI-keyed estate assessment."""
+        timings: dict[str, float] = {}
+        stage_started = time.monotonic()
+        assets = await self.cmdb.search_assets(limit=arguments.limit)
+        timings["cmdb"] = round((time.monotonic() - stage_started) * 1000, 1)
+        issues: dict[str, dict[str, Any]] = {}
+        source_status: dict[str, Any] = {
+            "inventory": {"available": True, "count": len(assets)},
+            "prometheus": {"available": True},
+            "loki": {"available": True},
+            "servicenow": {"available": True},
+        }
+
+        def issue_for(asset: dict[str, Any]) -> dict[str, Any]:
+            name = str(asset.get("fqdn") or asset.get("hostname") or asset.get("canonical_name"))
+            return issues.setdefault(
+                name,
+                {
+                    "entity": name,
+                    "inventory": asset,
+                    "prometheus": None,
+                    "loki": None,
+                    "servicenow": {"incidents": [], "problems": [], "changes": []},
+                    "reasons": [],
+                },
+            )
+
+        for asset in assets:
+            item = issue_for(asset)
+            item["prometheus"] = {
+                "health": asset.get("prometheus_health"),
+                "reachable": asset.get("reachable"),
+                "last_scrape_at": asset.get("last_scrape_at"),
+            }
+            if asset.get("prometheus_health") == "unhealthy" or asset.get("reachable") is False:
+                item["reasons"].append("Prometheus reports the target as unhealthy or unreachable.")
+            # Estate-wide Loki work is restricted to candidates already identified by
+            # broad monitoring state. Healthy assets are not expanded into N×queries.
+            if not item["reasons"]:
+                continue
+            model = await self.session.scalar(
+                select(InventoryAssetModel).where(
+                    or_(
+                        func.lower(InventoryAssetModel.canonical_name)
+                        == str(item["entity"]).casefold(),
+                        func.lower(InventoryAssetModel.fqdn) == str(item["entity"]).casefold(),
+                    )
+                )
+            )
+            if model is None:
+                continue
+            try:
+                stage_started = time.monotonic()
+                logs = await self.loki.asset_evidence(
+                    model,
+                    lookback_hours=arguments.lookback_hours,
+                    categories=["errors", "crashes", "exceptions", "oom", "filesystem"],
+                    limit_per_category=3,
+                )
+                item["loki"] = logs
+                error_count = sum(
+                    int(value or 0) for value in (logs.get("counts_by_category") or {}).values()
+                )
+                if error_count:
+                    item["reasons"].append(
+                        f"Loki contains {error_count} recent relevant error event"
+                        f"{'s' if error_count != 1 else ''}."
+                    )
+            except LokiError as exc:
+                source_status["loki"] = {
+                    "available": False,
+                    "error_code": exc.code,
+                    "reason": str(exc),
+                }
+                item["loki"] = {"available": False, "error_code": exc.code}
+            finally:
+                timings["loki"] = round(
+                    timings.get("loki", 0) + (time.monotonic() - stage_started) * 1000,
+                    1,
+                )
+
+        service_records: dict[str, list[dict[str, Any]]] = {
+            "incidents": [],
+            "problems": [],
+            "changes": [],
+        }
+        try:
+            stage_started = time.monotonic()
+            ticket_result = await self.ticketing.search_enabled_records(
+                {"mode": "search", "state": "open", "query": "", "limit": 50}
+            )
+            for provider in ticket_result.get("providers") or []:
+                for record in provider.get("records") or []:
+                    label = f"{str(record.get('record_type') or 'incident')}s"
+                    if label in service_records:
+                        service_records[label].append(record)
+            source_status["ticketing"] = {
+                "available": bool(ticket_result.get("active_source")),
+                "active_source": ticket_result.get("active_source"),
+            }
+        except (ServiceNowError, ZammadError) as exc:
+            source_status["ticketing"] = {
+                "available": False,
+                "error_code": exc.code,
+                "reason": str(exc),
+            }
+        finally:
+            timings["ticketing"] = round((time.monotonic() - stage_started) * 1000, 1)
+
+        for label, records in service_records.items():
+            for record in records:
+                haystack = " ".join(
+                    str(record.get(key) or "")
+                    for key in ("ci_name", "short_description", "description")
+                ).casefold()
+                for asset in assets:
+                    identities = {
+                        str(asset.get(key) or "").casefold()
+                        for key in ("hostname", "fqdn", "canonical_name", "primary_ip")
+                        if asset.get(key)
+                    }
+                    if not any(value and value in haystack for value in identities):
+                        continue
+                    item = issue_for(asset)
+                    item["servicenow"][label].append(record)
+                    record_type = str(record.get("record_type") or label.rstrip("s")).title()
+                    item["reasons"].append(
+                        f"ServiceNow {record_type} {record.get('number') or 'record'} is active."
+                    )
+                    break
+
+        attention = [item for item in issues.values() if item["reasons"]]
+        return {
+            "assessment_scope": "tenant_inventory",
+            "lookback_hours": arguments.lookback_hours,
+            "source_status": source_status,
+            "issues": attention,
+            "issue_count": len(attention),
+            "asset_count": len(assets),
+            "uncorrelated_servicenow": {
+                label: [
+                    record
+                    for record in records
+                    if not any(record in issue["servicenow"][label] for issue in attention)
+                ]
+                for label, records in service_records.items()
+            },
+            "observed_at": datetime.now(UTC),
+            "source_timings_ms": timings,
+        }
 
 
 class OperationalToolWorker:
@@ -916,6 +1165,11 @@ class OperationalToolWorker:
         if request is None:
             return False
         started = time.monotonic()
+        logger.info(
+            "operational_stage request_id=%s stage=request_received tool=%s",
+            request.id,
+            request.tool_name,
+        )
         integration = (
             "Local Knowledge Store"
             if request.tool_name == "knowledge_search"
@@ -946,6 +1200,11 @@ class OperationalToolWorker:
             },
         )
         try:
+            logger.info(
+                "operational_stage request_id=%s stage=routing_complete elapsed_ms=%.1f",
+                request.id,
+                (time.monotonic() - started) * 1000,
+            )
             result = await OperationalToolExecutor(
                 self.session, self.settings, self.secrets
             ).execute(request)
@@ -1020,6 +1279,13 @@ class OperationalToolWorker:
                 error_message="The connector could not execute the operational tool.",
             )
         try:
+            logger.info(
+                "operational_stage request_id=%s stage=synthesis_completed elapsed_ms=%.1f "
+                "source_timings_ms=%s",
+                request.id,
+                (time.monotonic() - started) * 1000,
+                (submission.result or {}).get("source_timings_ms", {}),
+            )
             await self.client.submit_operational_tool_result(
                 product.saas_url,
                 connector_id,
@@ -1043,6 +1309,11 @@ class OperationalToolWorker:
                 },
             )
             raise
+        logger.info(
+            "operational_stage request_id=%s stage=response_sent elapsed_ms=%.1f",
+            request.id,
+            (time.monotonic() - started) * 1000,
+        )
         result = submission.result or {}
         result_summary = (
             f"Returned {result.get('count')} records"

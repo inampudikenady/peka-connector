@@ -1,4 +1,5 @@
 import logging
+import time
 from asyncio import Lock
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from app.application.services.sources import ScanInProgressError, SourceService
 from app.application.services.zammad import ZammadService
 from app.core.config import get_settings
 from app.domain.ports.saas import SaaSClientError
+from app.infrastructure.database.models.integration import IntegrationStreamActivationModel
 from app.infrastructure.database.models.inventory import PrometheusConfigurationModel
 from app.infrastructure.database.models.servicenow import ServiceNowConfigurationModel
 from app.infrastructure.database.models.source import SourceModel
@@ -259,7 +261,23 @@ class ConnectorScheduler:
         job_id = f"servicenow:{configuration_id}"
         async with session_factory() as session:
             configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
-            if configuration is None or not configuration.enabled:
+            selected_capabilities = (
+                list(
+                    (
+                        await session.scalars(
+                            select(IntegrationStreamActivationModel.stream).where(
+                                IntegrationStreamActivationModel.integration_id
+                                == configuration.integration_id,
+                                IntegrationStreamActivationModel.active.is_(True),
+                                IntegrationStreamActivationModel.enabled.is_(True),
+                            )
+                        )
+                    ).all()
+                )
+                if configuration is not None
+                else []
+            )
+            if configuration is None or not configuration.enabled or not selected_capabilities:
                 if self._scheduler.get_job(job_id):
                     self._scheduler.remove_job(job_id)
                 if configuration:
@@ -267,21 +285,44 @@ class ConnectorScheduler:
                     await session.commit()
                 return
             seconds = configuration.sync_interval_seconds
+            now = datetime.now(UTC)
+            latest_attempt = (
+                _as_utc(configuration.last_attempted_sync_at)
+                if configuration.last_attempted_sync_at
+                else None
+            )
+            latest_success = (
+                _as_utc(configuration.last_successful_sync_at)
+                if configuration.last_successful_sync_at
+                else None
+            )
+            latest_sync_activity = latest_attempt or latest_success
+            overdue = bool(
+                latest_sync_activity and now - latest_sync_activity >= timedelta(seconds=seconds)
+            )
             job = self._scheduler.add_job(
                 self._run_servicenow_sync,
                 IntervalTrigger(seconds=seconds, timezone=UTC),
                 args=[configuration_id],
                 id=job_id,
                 replace_existing=True,
+                # Catch up a persisted overdue schedule after restart/wake, but
+                # do not race a newly-created configuration's initial manual sync.
+                next_run_time=now if overdue else now + timedelta(seconds=seconds),
                 max_instances=1,
                 coalesce=True,
-                misfire_grace_time=max(30, min(seconds, 300)),
+                misfire_grace_time=None,
             )
             configuration.next_scheduled_sync_at = job.next_run_time
             await session.commit()
         logger.info(
-            "ServiceNow synchronization job registered",
-            extra={"configuration_id": str(configuration_id), "interval_seconds": seconds},
+            "servicenow_cmdb_sync_scheduled",
+            extra={
+                "configuration_id": str(configuration_id),
+                "source_capabilities": selected_capabilities,
+                "interval_seconds": seconds,
+                "next_run_at": job.next_run_time.isoformat() if job.next_run_time else None,
+            },
         )
 
     async def remove_servicenow(self, configuration_id: UUID) -> None:
@@ -291,18 +332,36 @@ class ConnectorScheduler:
 
     async def _run_servicenow_sync(self, configuration_id: UUID) -> None:
         correlation_id = uuid4()
+        started = time.monotonic()
         async with session_factory() as session:
             operations = SqlAlchemyOperationsRepository(session)
             service = ServiceNowService(
                 session, SecretEncryptionService(get_settings().encryption_key)
             )
+            configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
+            logger.info(
+                "servicenow_cmdb_sync_started",
+                extra={
+                    "configuration_id": str(configuration_id),
+                    "correlation_id": str(correlation_id),
+                    "integration_id": str(configuration.integration_id) if configuration else None,
+                },
+            )
             try:
-                result = await service.synchronize(
-                    configuration_id, full=False, trigger="scheduled"
+                result = await service.synchronize(configuration_id)
+                duration_ms = round((time.monotonic() - started) * 1000, 1)
+                stage_errors = result.get("stage_errors") or {}
+                event_type = (
+                    "servicenow.sync_failed" if stage_errors else "servicenow.sync_completed"
+                )
+                message = (
+                    "Scheduled ServiceNow synchronization completed with stage failures"
+                    if stage_errors
+                    else "Scheduled ServiceNow synchronization completed"
                 )
                 await operations.record_event(
-                    "servicenow.sync_completed",
-                    "Scheduled ServiceNow synchronization completed",
+                    event_type,
+                    message,
                     target_type="servicenow_configuration",
                     target_id=str(configuration_id),
                     details={
@@ -310,10 +369,38 @@ class ConnectorScheduler:
                         "integration": "servicenow",
                         "correlation_id": str(correlation_id),
                         "counts": result["counts"],
+                        "duration_ms": duration_ms,
+                        "error_category": "PARTIAL_STAGE_FAILURE" if stage_errors else None,
+                        "failed_stages": sorted(stage_errors),
                     },
+                    level="ERROR" if stage_errors else "INFO",
                     component="servicenow",
                 )
+                logger.log(
+                    logging.ERROR if stage_errors else logging.INFO,
+                    "servicenow_cmdb_sync_failed"
+                    if stage_errors
+                    else "servicenow_cmdb_sync_completed",
+                    extra={
+                        "configuration_id": str(configuration_id),
+                        "correlation_id": str(correlation_id),
+                        "duration_ms": duration_ms,
+                        "counts": result["counts"],
+                        "error_category": "PARTIAL_STAGE_FAILURE" if stage_errors else None,
+                        "failed_stages": sorted(stage_errors),
+                    },
+                )
             except Exception as exc:
+                duration_ms = round((time.monotonic() - started) * 1000, 1)
+                error_category = str(getattr(exc, "code", type(exc).__name__))[:100]
+                configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
+                if configuration is not None:
+                    configuration.last_attempted_sync_at = datetime.now(UTC)
+                    if not configuration.last_sync_error:
+                        configuration.last_sync_error = (
+                            f"Scheduled synchronization failed ({error_category})."
+                        )
+                    await session.commit()
                 await operations.record_event(
                     "servicenow.sync_failed",
                     "Scheduled ServiceNow synchronization failed",
@@ -323,10 +410,20 @@ class ConnectorScheduler:
                         "trigger": "scheduled",
                         "integration": "servicenow",
                         "correlation_id": str(correlation_id),
-                        "error_category": getattr(exc, "code", type(exc).__name__),
+                        "error_category": error_category,
+                        "duration_ms": duration_ms,
                     },
                     level="ERROR",
                     component="servicenow",
+                )
+                logger.error(
+                    "servicenow_cmdb_sync_failed",
+                    extra={
+                        "configuration_id": str(configuration_id),
+                        "correlation_id": str(correlation_id),
+                        "duration_ms": duration_ms,
+                        "error_category": error_category,
+                    },
                 )
             finally:
                 configuration = await session.get(ServiceNowConfigurationModel, configuration_id)
@@ -334,6 +431,15 @@ class ConnectorScheduler:
                 if configuration:
                     configuration.next_scheduled_sync_at = job.next_run_time if job else None
                     await session.commit()
+                logger.info(
+                    "servicenow_cmdb_next_run",
+                    extra={
+                        "configuration_id": str(configuration_id),
+                        "next_run_at": (
+                            job.next_run_time.isoformat() if job and job.next_run_time else None
+                        ),
+                    },
+                )
 
     async def _run_zammad_sync(self, configuration_id: UUID) -> None:
         correlation_id = uuid4()
@@ -635,7 +741,10 @@ class ConnectorScheduler:
             id="heartbeat",
             replace_existing=True,
             max_instances=1,
-            misfire_grace_time=60,
+            # A laptop sleep or network pause can exceed a normal grace window.
+            # Running the missed one-shot job immediately on resume lets its normal
+            # success/backoff path schedule the next heartbeat without manual action.
+            misfire_grace_time=None,
         )
         async with session_factory() as session:
             await SqlAlchemyOperationsRepository(session).set_next_heartbeat(run_at, True)

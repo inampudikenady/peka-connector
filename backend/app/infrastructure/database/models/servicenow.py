@@ -31,6 +31,7 @@ class ServiceNowConfigurationModel(Base):
     connection_state: Mapped[str] = mapped_column(String(32), default="not_tested")
     last_test_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     last_successful_test_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
+    last_attempted_sync_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     last_successful_sync_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)
     last_sync_error: Mapped[str | None] = mapped_column(String(2000), default=None)
     next_scheduled_sync_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), default=None)

@@ -34,9 +34,7 @@ async def search_knowledge(
 
 
 @router.get("/stats", response_model=KnowledgeStatsResponse)
-async def knowledge_stats(
-    _: CurrentUser, knowledge: KnowledgeServiceDep
-) -> KnowledgeStatsResponse:
+async def knowledge_stats(_: CurrentUser, knowledge: KnowledgeServiceDep) -> KnowledgeStatsResponse:
     health = await knowledge.health_status()
     if not health.qdrant_reachable or not health.collection_available:
         return KnowledgeStatsResponse(

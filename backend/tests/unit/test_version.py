@@ -46,7 +46,7 @@ def test_package_connector_version_has_development_fallback(
 
     monkeypatch.setattr(version.metadata, "version", missing)
     assert version.package_connector_version() == version.DEVELOPMENT_VERSION
-    assert version.DEVELOPMENT_VERSION == "1.0.2"
+    assert version.DEVELOPMENT_VERSION == "2.0.1"
 
 
 def test_package_connector_version_rejects_invalid_installed_metadata(

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.integrations import IntegrationService
@@ -367,7 +367,7 @@ class ServiceNowClient:
                     cause = cause.__cause__
                 if isinstance(cause, socket.gaierror):
                     code, message = "DNS_FAILURE", "The ServiceNow hostname could not be resolved."
-                elif isinstance(cause, (ssl.SSLError, ssl.CertificateError)):
+                elif isinstance(cause, ssl.SSLError | ssl.CertificateError):
                     code, message = (
                         "TLS_FAILURE",
                         "The ServiceNow TLS certificate could not be validated.",
@@ -466,10 +466,14 @@ class ServiceNowService:
         model.request_timeout_seconds = float(values.get("request_timeout_seconds", 20))
         model.page_size = int(values.get("page_size", 200))
         model.sync_interval_seconds = int(values.get("sync_interval_seconds", 900))
-        model.enabled = bool(values.get("enabled", True))
-        integration.enabled = model.enabled
-        if not model.enabled:
-            await self._mark_cache(model.integration_id, "inactive")
+        # ServiceNow configuration is retained independently of its Ticketing
+        # and CMDB selections. Runtime enablement is derived from whether either
+        # capability is selected; saving configuration cannot silently select it.
+        selected = await IntegrationService(self.session, self.encryption).integration_is_selected(
+            integration.id
+        )
+        model.enabled = selected
+        integration.enabled = selected
         await self.session.commit()
         await self.session.refresh(model)
         return await self._response(model)
@@ -502,6 +506,25 @@ class ServiceNowService:
             raise ServiceNowError(
                 "SERVICENOW_DISABLED", "The ServiceNow integration is disabled.", 503
             )
+        model.last_attempted_sync_at = datetime.now(UTC)
+        await self.session.commit()
+        integrations = IntegrationService(self.session, self.encryption)
+        ticketing_source = await integrations.active_source("ticketing")
+        cmdb_source = await integrations.active_source("cmdb")
+        selected_stages: set[str] = set()
+        selected_capabilities: list[str] = []
+        if ticketing_source and ticketing_source.integration_id == model.integration_id:
+            selected_stages.update({"incidents", "incident_journal", "problems", "changes"})
+            selected_capabilities.append("ticketing")
+        if cmdb_source and cmdb_source.integration_id == model.integration_id:
+            selected_stages.update({"configuration_items", "relationships"})
+            selected_capabilities.append("cmdb")
+        if not selected_stages:
+            raise ServiceNowError(
+                "SERVICENOW_NOT_SELECTED",
+                "ServiceNow is not selected for Ticketing or CMDB.",
+                409,
+            )
         client = self._client(model)
         counts: dict[str, int] = dict(model.counts_json or {})
         errors: dict[str, str] = {}
@@ -524,6 +547,8 @@ class ServiceNowService:
             ),
         }
         for stage in STAGES:
+            if stage not in selected_stages:
+                continue
             cursor = await self._cursor(model.integration_id, stage)
             cursor.last_attempt_at = datetime.now(UTC)
             after = cursor.cursor_at - self.overlap if cursor.cursor_at else None
@@ -555,7 +580,7 @@ class ServiceNowService:
                 integration.last_successful_sync_at = model.last_successful_sync_at
                 integration.last_error = None
         await self.session.commit()
-        if errors and len(errors) == len(STAGES):
+        if errors and len(errors) == len(selected_stages):
             raise ServiceNowError(
                 "SYNCHRONIZATION_FAILED",
                 model.last_sync_error or "ServiceNow synchronization failed.",
@@ -564,6 +589,7 @@ class ServiceNowService:
         return {
             "counts": counts,
             "stage_errors": errors,
+            "selected_capabilities": selected_capabilities,
             "last_successful_sync_at": model.last_successful_sync_at,
         }
 
@@ -1089,7 +1115,18 @@ class ServiceNowService:
         return model
 
     async def _configuration(self, configuration_id: UUID) -> ServiceNowConfigurationModel:
-        model = await self.session.get(ServiceNowConfigurationModel, configuration_id)
+        connector_id = await IntegrationService(self.session, self.encryption).connector_id()
+        model = await self.session.scalar(
+            select(ServiceNowConfigurationModel)
+            .join(
+                ConnectorIntegrationModel,
+                ConnectorIntegrationModel.id == ServiceNowConfigurationModel.integration_id,
+            )
+            .where(
+                ServiceNowConfigurationModel.id == configuration_id,
+                ConnectorIntegrationModel.connector_id == connector_id,
+            )
+        )
         if model is None:
             raise ServiceNowError(
                 "CONFIGURATION_NOT_FOUND", "ServiceNow configuration was not found.", 404
@@ -1112,16 +1149,111 @@ class ServiceNowService:
             )
 
     def _availability(self, model: ServiceNowConfigurationModel) -> dict[str, Any]:
+        stale = not model.last_successful_sync_at or (
+            datetime.now(UTC) - model.last_successful_sync_at
+            > timedelta(seconds=model.sync_interval_seconds * 2)
+        )
         return {
             "enabled": model.enabled,
             "state": model.connection_state,
             "cache_timestamp": model.last_successful_sync_at.isoformat()
             if model.last_successful_sync_at
             else None,
-            "stale": not model.last_successful_sync_at
-            or datetime.now(UTC) - model.last_successful_sync_at
-            > timedelta(seconds=model.sync_interval_seconds * 2),
+            "stale": stale,
+            "freshness_state": "error" if model.last_sync_error else "stale" if stale else "fresh",
+            "freshness_threshold_seconds": model.sync_interval_seconds * 2,
             "last_error": model.last_sync_error,
+        }
+
+    async def cmdb_observability(
+        self, configuration_id: UUID, *, page: int = 1, page_size: int = 25
+    ) -> dict[str, Any]:
+        """Expose only fields retained by the ServiceNow CI cache."""
+        model = await self._configuration(configuration_id)
+        integration_service = IntegrationService(self.session, self.encryption)
+        active = await integration_service.active_source("cmdb")
+        filters = (
+            ServiceNowCIModel.integration_id == model.integration_id,
+            ServiceNowCIModel.cache_status == "active",
+        )
+        total = int(
+            await self.session.scalar(select(func.count(ServiceNowCIModel.id)).where(*filters)) or 0
+        )
+        rows = list(
+            (
+                await self.session.scalars(
+                    select(ServiceNowCIModel)
+                    .where(*filters)
+                    .order_by(ServiceNowCIModel.name)
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            ).all()
+        )
+        relationship_count = int(
+            await self.session.scalar(
+                select(func.count(ServiceNowRelationshipModel.id)).where(
+                    ServiceNowRelationshipModel.integration_id == model.integration_id,
+                    ServiceNowRelationshipModel.cache_status == "active",
+                )
+            )
+            or 0
+        )
+        server_count = int(
+            await self.session.scalar(
+                select(func.count(ServiceNowCIModel.id)).where(
+                    *filters,
+                    or_(
+                        func.lower(ServiceNowCIModel.sys_class_name).contains("server"),
+                        func.lower(ServiceNowCIModel.sys_class_name).contains("computer"),
+                        func.lower(ServiceNowCIModel.sys_class_name).contains("host"),
+                    ),
+                )
+            )
+            or 0
+        )
+        availability = self._availability(model)
+        return {
+            "source": "ServiceNow CMDB",
+            "active": bool(
+                active
+                and active.source_key == "servicenow_cmdb"
+                and active.integration_id == model.integration_id
+            ),
+            "connection_state": model.connection_state,
+            "sync_state": availability["state"],
+            "last_successful_sync_at": model.last_successful_sync_at,
+            "last_attempted_sync_at": model.last_attempted_sync_at,
+            "stale": availability["stale"],
+            "freshness_state": availability["freshness_state"],
+            "freshness_threshold_seconds": availability["freshness_threshold_seconds"],
+            "cache_timestamp": availability["cache_timestamp"],
+            "total_cis": total,
+            "server_cis": server_count,
+            "other_cis": max(0, total - server_count),
+            "relationship_count": relationship_count,
+            "last_error": model.last_sync_error,
+            "items": [
+                {
+                    "id": str(row.id),
+                    "ci_name": row.name,
+                    "ci_class": row.sys_class_name,
+                    "fqdn": row.fqdn,
+                    "ip_address": row.ip_address,
+                    "operating_system": _display((row.fields_json or {}).get("os")),
+                    "environment": _display((row.fields_json or {}).get("environment")),
+                    "application": _display((row.fields_json or {}).get("application")),
+                    "business_owner": _display((row.fields_json or {}).get("owned_by")),
+                    "support_group": _display((row.fields_json or {}).get("support_group")),
+                    "lifecycle_state": _display((row.fields_json or {}).get("install_status")),
+                    "updated_at": row.source_updated_at,
+                    "source": "ServiceNow CMDB",
+                }
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
         }
 
     async def _response(self, model: ServiceNowConfigurationModel) -> dict[str, Any]:
@@ -1143,6 +1275,7 @@ class ServiceNowService:
             "last_test_at": model.last_test_at,
             "last_successful_test_at": model.last_successful_test_at,
             "last_successful_sync_at": model.last_successful_sync_at,
+            "last_attempted_sync_at": model.last_attempted_sync_at,
             "last_sync_error": model.last_sync_error,
             "next_scheduled_sync_at": model.next_scheduled_sync_at,
             "counts": model.counts_json or {},

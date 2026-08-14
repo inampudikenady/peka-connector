@@ -571,17 +571,11 @@ class LocalKnowledgeService:
             ) from exc
         accepted: list[KnowledgeSearchResult] = []
         for candidate in candidates:
-            lexical_score, matched_terms = _lexical_relevance(
-                sanitized_query, candidate.content
+            lexical_score, matched_terms = _lexical_relevance(sanitized_query, candidate.content)
+            calibrated_score = _LEXICAL_WEIGHT * lexical_score + _VECTOR_WEIGHT * max(
+                0.0, min(1.0, candidate.score)
             )
-            calibrated_score = (
-                _LEXICAL_WEIGHT * lexical_score
-                + _VECTOR_WEIGHT * max(0.0, min(1.0, candidate.score))
-            )
-            if (
-                matched_terms < MINIMUM_LEXICAL_MATCHES
-                or calibrated_score < MINIMUM_EVIDENCE_SCORE
-            ):
+            if matched_terms < MINIMUM_LEXICAL_MATCHES or calibrated_score < MINIMUM_EVIDENCE_SCORE:
                 continue
             metadata = dict(candidate.metadata)
             metadata.update(
@@ -615,12 +609,8 @@ class LocalKnowledgeService:
             else "none"
         )
         top = accepted[0] if accepted else candidates[0] if candidates else None
-        top_vector_score = (
-            top.metadata.get("vector_score", top.score) if top is not None else None
-        )
-        qdrant_result_count = int(
-            getattr(self.store, "last_search_hit_count", len(candidates))
-        )
+        top_vector_score = top.metadata.get("vector_score", top.score) if top is not None else None
+        qdrant_result_count = int(getattr(self.store, "last_search_hit_count", len(candidates)))
         logger.info(
             "knowledge search completed qdrant_result_count=%s parsed_result_count=%s "
             "accepted_result_count=%s top_score=%s top_vector_score=%s document_id=%s "
@@ -689,9 +679,7 @@ class LocalKnowledgeService:
             health.collection_available,
             documents > 0,
             chunk_count > 0,
-            health.qdrant_reachable
-            and health.collection_available
-            and health.statistics_readable,
+            health.qdrant_reachable and health.collection_available and health.statistics_readable,
             True if product.last_successful_knowledge_search_at is not None else None,
             product.last_successful_knowledge_search_at,
             health.engine_version,

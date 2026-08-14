@@ -67,3 +67,112 @@ def test_integration_api_rejects_connector_or_tenant_identity_override(
         },
     )
     assert response.status_code == 422
+
+
+def test_stream_switch_api_returns_explicit_confirmation_contract(client: TestClient) -> None:
+    headers = _headers(client)
+    servicenow = client.post(
+        "/api/v1/integrations",
+        headers=headers,
+        json={
+            "integration_type": "servicenow",
+            "display_name": "ServiceNow",
+            "enabled": True,
+        },
+    ).json()
+    zammad = client.post(
+        "/api/v1/integrations",
+        headers=headers,
+        json={
+            "integration_type": "zammad",
+            "display_name": "Zammad",
+            "enabled": True,
+        },
+    ).json()
+
+    conflict = client.post(
+        f"/api/v1/integrations/{zammad['id']}/streams/ticketing/select",
+        headers=headers,
+        json={"confirmed": False},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == {
+        "code": "SOURCE_SWITCH_CONFIRMATION_REQUIRED",
+        "message": (
+            "ServiceNow is currently selected as the Ticketing source. Switching to Zammad "
+            "will stop PEKA from using ServiceNow for Ticketing and select Zammad. Saved "
+            "configuration will be retained."
+        ),
+        "stream": "ticketing",
+        "current_source": "ServiceNow",
+        "requested_source": "Zammad",
+    }
+    switched = client.post(
+        f"/api/v1/integrations/{zammad['id']}/streams/ticketing/select",
+        headers=headers,
+        json={"confirmed": True},
+    )
+    assert switched.status_code == 200
+    streams = client.get("/api/v1/integrations/streams", headers=headers).json()
+    ticketing = next(item for item in streams if item["stream"] == "ticketing")
+    assert ticketing["selected_source"] == "zammad"
+    sources = {item["source_key"]: item for item in ticketing["sources"]}
+    assert sources["servicenow"]["configured"] is True
+    assert sources["servicenow"]["selected"] is False
+    assert sources["zammad"]["selected"] is True
+    assert servicenow["id"] == sources["servicenow"]["integration_id"]
+
+
+def test_configuring_zammad_cannot_bypass_selected_servicenow(client: TestClient) -> None:
+    headers = _headers(client)
+    servicenow = client.post(
+        "/api/v1/servicenow/configurations",
+        headers=headers,
+        json={
+            "name": "ServiceNow",
+            "instance_url": "https://instance.service-now.com",
+            "username": "api-reader",
+            "password": "saved-servicenow-secret",
+        },
+    )
+    assert servicenow.status_code == 201, servicenow.text
+    zammad = client.post(
+        "/api/v1/zammad/configurations",
+        headers=headers,
+        json={
+            "name": "Zammad",
+            "base_url": "https://tickets.example.test",
+            "access_token": "saved-zammad-token",
+            "enabled": True,
+        },
+    )
+    assert zammad.status_code == 201, zammad.text
+    assert zammad.json()["enabled"] is False
+
+    streams = client.get("/api/v1/integrations/streams", headers=headers).json()
+    ticketing = next(item for item in streams if item["stream"] == "ticketing")
+    sources = {item["source_key"]: item for item in ticketing["sources"]}
+    assert sources["servicenow"]["selected"] is True
+    assert sources["zammad"]["selected"] is False
+
+    conflict = client.post(
+        f"/api/v1/integrations/{sources['zammad']['integration_id']}"
+        "/streams/ticketing/select",
+        headers=headers,
+        json={"confirmed": False},
+    )
+    assert conflict.status_code == 409
+    switched = client.post(
+        f"/api/v1/integrations/{sources['zammad']['integration_id']}"
+        "/streams/ticketing/select",
+        headers=headers,
+        json={"confirmed": True},
+    )
+    assert switched.status_code == 200
+    ticketing = next(
+        item
+        for item in client.get("/api/v1/integrations/streams", headers=headers).json()
+        if item["stream"] == "ticketing"
+    )
+    assert ticketing["selected_source"] == "zammad"
+    assert len(client.get("/api/v1/servicenow/configurations", headers=headers).json()) == 1

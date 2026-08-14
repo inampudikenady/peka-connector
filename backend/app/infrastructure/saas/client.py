@@ -212,7 +212,8 @@ class HttpxPEKASaaSClient:
         if not response.is_success:
             self._raise_status(response.status_code, "operational_tool_claim")
         try:
-            return OperationalToolRequest.model_validate(response.json())
+            request = OperationalToolRequest.model_validate(response.json())
+            return request
         except (ValidationError, ValueError) as exc:
             raise SaaSClientError(
                 "malformed_response",
@@ -234,6 +235,7 @@ class HttpxPEKASaaSClient:
         headers = {
             "Authorization": f"Bearer {connector_secret}",
             "X-PEKA-Connector-ID": str(connector_id),
+            "X-Request-ID": str(request_id),
         }
         async with self._client() as client:
             try:

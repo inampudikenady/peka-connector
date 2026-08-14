@@ -1,6 +1,6 @@
 # Existing SaaS knowledge migration plan
 
-PEKA Connector 1.0.2 does not delete or rewrite existing SaaS document objects, PostgreSQL rows,
+PEKA Connector v2.0.1 does not delete or rewrite existing SaaS document objects, PostgreSQL rows,
 or Qdrant points. Existing central collection `peka_document_chunks` remains a compatibility and
 rollback source until each tenant is migrated and validated.
 

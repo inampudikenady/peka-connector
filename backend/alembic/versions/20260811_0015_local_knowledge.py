@@ -7,6 +7,7 @@ Revises: 20260805_0014
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "20260811_0015"
@@ -18,7 +19,12 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     with op.batch_alter_table("documents") as batch:
         batch.add_column(
-            sa.Column("knowledge_status", sa.String(length=32), nullable=False, server_default="PENDING")
+            sa.Column(
+                "knowledge_status",
+                sa.String(length=32),
+                nullable=False,
+                server_default="PENDING",
+            )
         )
         batch.add_column(sa.Column("indexed_content_hash", sa.String(length=64), nullable=True))
         batch.add_column(

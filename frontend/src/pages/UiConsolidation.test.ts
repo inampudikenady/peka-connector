@@ -24,7 +24,9 @@ describe('consolidated connector administration UI', () => {
   });
 
   it('defines integration and activity tabs and redirects bookmarked routes', () => {
-    for (const label of ['Catalog', 'Configured', 'Data & Sync']) expect(integrationsSource).toContain(`label="${label}"`);
+    for (const label of ['Sources', 'Data & Sync']) expect(integrationsSource).toContain(`label="${label}"`);
+    expect(integrationsSource).not.toContain('label="Catalog"');
+    expect(integrationsSource).not.toContain('label="Configured"');
     for (const label of ['Overview', 'Requests', 'Events', 'Logs']) expect(activitySource).toContain(`label="${label}"`);
     expect(appSource).toContain('/integrations?tab=data-sync');
     expect(appSource).toContain('/activity?tab=requests');
@@ -71,13 +73,17 @@ describe('consolidated connector administration UI', () => {
   });
 
   it('prevents unsupported adapter enablement and preserves catalog controls', () => {
-    expect(integrationsSource).toContain('Adapter unavailable');
-    expect(integrationsSource).toContain('<Button size="small" disabled>Coming soon</Button>');
-    expect(integrationsSource).toContain("configured.enabled ? 'Enabled' : 'Disabled'");
+    expect(integrationsSource).toContain('label={card.state}');
+    expect(integrationsSource).toContain("card.state === 'Coming soon'");
+    expect(integrationsSource).toContain("card.state === 'Active'");
     expect(integrationsSource).toContain('Search integrations');
-    expect(integrationsSource).toContain('Category');
-    expect(integrationsSource).not.toContain('Make active');
-    expect(integrationsSource).not.toContain('Switch active');
+    expect(integrationsSource).toContain('Stream');
+    expect(integrationsSource).toContain('Switch selected source');
+    expect(integrationsSource).toContain('Switch to {switching?.source.source_name}');
+    expect(integrationsSource).not.toContain('function StreamOverview');
+    expect(integrationsSource).not.toContain('Selected: ${selected.source_name}');
+    expect(integrationsSource).not.toContain('value="configured"');
+    expect(integrationsSource).toContain('SOURCE_SWITCH_CONFIRMATION_REQUIRED');
     expect(integrationsSource).not.toContain('active_provider_role');
   });
 

@@ -75,7 +75,7 @@ def test_runtime_version_is_consistent_across_apis(client: TestClient) -> None:
     assert overview.status_code == 200
     assert diagnostics.status_code == 200
     assert overview.json()["connector_version"] == CONNECTOR_VERSION
-    assert overview.json()["peka_connector"] == "1.0.2"
+    assert overview.json()["peka_connector"] == "2.0.1"
     assert overview.json()["components"]["qdrant"] == "Unknown"
     assert overview.json()["knowledge_store"]["status"] == "unavailable"
     assert diagnostics.json()["version"] == CONNECTOR_VERSION
@@ -109,7 +109,7 @@ def test_overview_exposes_structured_healthy_knowledge_store(client: TestClient)
         response = client.get("/api/v1/overview", headers=_login(client))
         assert response.status_code == 200
         payload = response.json()
-        assert payload["peka_connector"] == "1.0.2"
+        assert payload["peka_connector"] == "2.0.1"
         assert payload["components"] == {"qdrant": "runtime-version"}
         assert payload["knowledge_store"] == {
             "status": "healthy",

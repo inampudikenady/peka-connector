@@ -1,6 +1,6 @@
 # Customer-resident data plane
 
-PEKA Connector 1.0.2 separates the customer data plane from the PEKA SaaS control and
+PEKA Connector v2.0.1 separates the customer data plane from the PEKA SaaS control and
 orchestration plane.
 
 ```text

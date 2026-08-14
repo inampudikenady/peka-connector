@@ -84,13 +84,12 @@ export function LokiPage() {
         <TextField label="Discovery lookback (days)" type="number" value={form.discovery_lookback_days} onChange={(event) => setForm({ ...form, discovery_lookback_days: Number(event.target.value) })} helperText="Daily bounded scans; 1–90 days." />
       </Stack>
       <FormControlLabel control={<Checkbox checked={form.tls_verify} onChange={(event) => setForm({ ...form, tls_verify: event.target.checked })} />} label="Verify TLS certificates" />
-      <FormControlLabel control={<Checkbox checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />} label="Enable operational log evidence" />
     </Stack></CardContent><CardActions>
       {editingId && <Button onClick={() => { setEditingId(null); setForm(empty); }}>Cancel</Button>}
       <Button variant="contained" disabled={!form.name || !form.base_url} onClick={() => void save()}>Save configuration</Button>
     </CardActions></Card>}
     {loading ? <LoadingState label="Loading Loki configurations" /> : <Grid container spacing={2}>{items.map((item) => <Grid key={item.id} size={{ xs: 12, md: 6 }}><Card variant="outlined"><CardContent>
-      <Stack direction="row" justifyContent="space-between"><Typography variant="h6">{item.name}</Typography><Chip size="small" color={item.enabled ? 'success' : 'default'} label={item.enabled ? 'Enabled' : 'Disabled'} /></Stack>
+      <Stack direction="row" justifyContent="space-between"><Typography variant="h6">{item.name}</Typography><Chip size="small" label="Configured" /></Stack>
       <Typography color="text.secondary">{item.base_url}</Typography>
       {item.warnings.map((warning) => <Alert key={warning} severity="warning" sx={{ mt: 1 }}>{warning}</Alert>)}
       <Typography sx={{ mt: 2 }}>{item.stream_count} streams · {item.labels.length} labels</Typography>
@@ -100,8 +99,7 @@ export function LokiPage() {
       {item.last_error && <Alert severity="error" sx={{ mt: 1 }}>{item.last_error}</Alert>}
     </CardContent>{admin && <CardActions>
       <Button onClick={() => { setEditingId(item.id); setForm({ name: item.name, base_url: item.base_url, auth_type: item.auth_type, username: item.username ?? '', secret: '', tls_verify: item.tls_verify, request_timeout_seconds: item.request_timeout_seconds, discovery_lookback_days: item.discovery_lookback_days, enabled: item.enabled }); }}>Edit</Button>
-      <Button disabled={!item.enabled} onClick={() => void act(item, 'discover')}>Discover</Button>
-      <Button variant="contained" disabled={!item.enabled} onClick={() => void act(item, 'test')}>Test connection</Button>
+      <Button variant="contained" onClick={() => void act(item, 'test')}>Test connection</Button>
     </CardActions>}</Card></Grid>)}</Grid>}
     {!loading && items.length === 0 && <Alert severity="info">Loki is not configured. Log evidence will be reported as unknown, never as healthy or empty.</Alert>}
   </Stack>;

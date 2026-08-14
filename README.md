@@ -1,6 +1,6 @@
 # PEKA Connector
 
-PEKA Connector 1.0.2 is the customer-resident PEKA data plane. It provides a local
+PEKA Connector v2.0.1 is the customer-resident PEKA data plane. It provides a local
 administration UI, integration access, policy enforcement, document processing, local semantic
 knowledge storage and retrieval, and outbound-only HTTPS communication with PEKA SaaS.
 

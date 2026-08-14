@@ -25,6 +25,7 @@ IDENTITY_PRIORITY = (
     "cloud_instance_id",
     "serial_number",
     "asset_tag",
+    "cmdb_id",
     "fqdn",
     "alias",
     "hostname",
@@ -50,6 +51,10 @@ CMDB_FIELDS = (
     "lifecycle_status",
     "description",
     "aliases",
+    "hosted_on",
+    "service",
+    "port",
+    "protocol",
 )
 IDENTITY_FIELDS = (
     "cloud_instance_id",
@@ -193,6 +198,7 @@ def identities_from_fields(fields: dict[str, Any]) -> list[tuple[str, str, str]]
         ("cloud_instance_id", "cloud_instance_id"),
         ("serial_number", "serial_number"),
         ("asset_tag", "asset_tag"),
+        ("cmdb_id", "source_record_key"),
         ("fqdn", "fqdn"),
         ("hostname", "hostname"),
         ("ip_address", "primary_ip"),
@@ -304,6 +310,7 @@ class InventoryService:
             .order_by(InventoryCorrelationModel.created_at.desc())
             .limit(1)
         )
+
         if manual:
             observation.asset_id = manual.asset_id if manual.status == "matched" else None
             observation.status = "observed" if manual.status == "matched" else "unmatched"
@@ -364,9 +371,9 @@ class InventoryService:
             else len(IDENTITY_PRIORITY) - 1
         )
         nonempty = [
-            values
+            exact_values
             for priority, kind in enumerate(IDENTITY_PRIORITY)
-            if priority <= conflict_ceiling and (values := all_exact.get(kind, set()))
+            if priority <= conflict_ceiling and (exact_values := all_exact.get(kind, set[UUID]()))
         ]
         conflicting = len({asset_id for values in nonempty for asset_id in values}) > 1
         if len(candidates) == 1 and not conflicting:
@@ -407,6 +414,78 @@ class InventoryService:
                     },
                 )
             )
+
+    async def reconcile_cmdb_relationships(self) -> None:
+        """Resolve CMDB hosted-on references after a complete dataset import."""
+        observations = list(
+            (
+                await self.session.scalars(
+                    select(InventoryObservationModel).where(
+                        InventoryObservationModel.source_type == "cmdb",
+                        InventoryObservationModel.asset_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        identities = list(
+            (
+                await self.session.scalars(
+                    select(InventoryIdentityModel).where(
+                        InventoryIdentityModel.identity_type.in_(
+                            ("cmdb_id", "hostname", "fqdn", "alias")
+                        ),
+                        InventoryIdentityModel.asset_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        by_reference: dict[str, set[UUID]] = {}
+        for identity in identities:
+            if identity.asset_id:
+                by_reference.setdefault(identity.normalized_value.casefold(), set()).add(
+                    identity.asset_id
+                )
+        for observation in observations:
+            source_record_key = clean_text(
+                observation.observed_fields_json.get("source_record_key")
+            )
+            if source_record_key and observation.asset_id:
+                by_reference.setdefault(source_record_key.casefold(), set()).add(
+                    observation.asset_id
+                )
+        now = datetime.now(UTC)
+        for observation in observations:
+            hosted_on = clean_text(observation.observed_fields_json.get("hosted_on"))
+            if not hosted_on or observation.asset_id is None:
+                continue
+            candidates = by_reference.get(hosted_on.rstrip(".").casefold(), set())
+            if len(candidates) != 1:
+                continue
+            target_asset_id = next(iter(candidates))
+            dependency = await self.session.scalar(
+                select(InventoryDependencyModel).where(
+                    InventoryDependencyModel.source_asset_id == observation.asset_id,
+                    InventoryDependencyModel.source_observation_id == observation.id,
+                    InventoryDependencyModel.relation_type == "hosted_on",
+                    InventoryDependencyModel.target_reference == hosted_on,
+                )
+            )
+            if dependency is None:
+                self.session.add(
+                    InventoryDependencyModel(
+                        source_asset_id=observation.asset_id,
+                        target_asset_id=target_asset_id,
+                        source_observation_id=observation.id,
+                        relation_type="hosted_on",
+                        target_reference=hosted_on,
+                        evidence="Deterministic hosted_on relationship from local CMDB",
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    )
+                )
+            else:
+                dependency.target_asset_id = target_asset_id
+                dependency.last_seen_at = now
 
     async def sync_prometheus_topology(
         self,
@@ -911,6 +990,20 @@ class InventoryService:
                     _, normalized_short = normalize_hostname(normalized)
                     if normalized_short:
                         normalized_values.add(normalized_short)
+            legacy_cmdb_asset_ids = {
+                item.asset_id
+                for item in (
+                    await self.session.scalars(
+                        select(InventoryObservationModel).where(
+                            InventoryObservationModel.source_type == "cmdb",
+                            InventoryObservationModel.asset_id.is_not(None),
+                        )
+                    )
+                ).all()
+                if clean_text(item.observed_fields_json.get("source_record_key"))
+                and str(item.observed_fields_json["source_record_key"]).casefold() == clean
+                and item.asset_id
+            }
             filters.append(
                 or_(
                     func.lower(InventoryAssetModel.hostname) == short,
@@ -923,6 +1016,7 @@ class InventoryService:
                             InventoryIdentityModel.normalized_value.in_(sorted(normalized_values))
                         )
                     ),
+                    InventoryAssetModel.id.in_(legacy_cmdb_asset_ids),
                 )
             )
         if os_family:
@@ -971,6 +1065,19 @@ class InventoryService:
                 and not str(item.observed_fields_json.get("last_scrape")).startswith("0001-")
             ]
             last_scrape = max((str(value) for value in last_scrapes), default=None)
+            cmdb_observations = sorted(
+                (item for item in observations if item.source_type == "cmdb"),
+                key=lambda item: item.last_seen_at,
+                reverse=True,
+            )
+            description = next(
+                (
+                    clean_text(item.observed_fields_json.get("description"))
+                    for item in cmdb_observations
+                    if clean_text(item.observed_fields_json.get("description"))
+                ),
+                None,
+            )
             metrics_available = bool(prometheus and last_scrape)
             node_targets = [
                 item
@@ -995,6 +1102,9 @@ class InventoryService:
                     "operating_system": asset.operating_system,
                     "environment": asset.environment,
                     "asset_type": asset.asset_type,
+                    "role": asset.application or asset.asset_type,
+                    "application": asset.application,
+                    "description": description,
                     "lifecycle_status": asset.lifecycle_status,
                     "prometheus_health": health,
                     "prometheus_scrape_status": (
@@ -1016,6 +1126,89 @@ class InventoryService:
                 }
             )
         return results
+
+    async def asset_relationships(self, asset_id: UUID) -> dict[str, Any] | None:
+        """Return deterministic, inventory-local services and dependency edges."""
+        detail = await self.asset_detail(asset_id)
+        if detail is None:
+            return None
+        incoming = list(
+            (
+                await self.session.scalars(
+                    select(InventoryDependencyModel).where(
+                        InventoryDependencyModel.target_asset_id == asset_id
+                    )
+                )
+            ).all()
+        )
+        source_ids = {item.source_asset_id for item in incoming}
+        observations = (
+            list(
+                (
+                    await self.session.scalars(
+                        select(InventoryObservationModel).where(
+                            InventoryObservationModel.asset_id.in_(source_ids),
+                            InventoryObservationModel.source_type == "cmdb",
+                        )
+                    )
+                ).all()
+            )
+            if source_ids
+            else []
+        )
+        source_assets = {
+            item.id: item
+            for item in (
+                list(
+                    (
+                        await self.session.scalars(
+                            select(InventoryAssetModel).where(
+                                InventoryAssetModel.id.in_(source_ids),
+                                InventoryAssetModel.retired_at.is_(None),
+                            )
+                        )
+                    ).all()
+                )
+                if source_ids
+                else []
+            )
+        }
+        return {
+            "asset": detail["asset"],
+            "services": detail["services"],
+            "outgoing_relationships": detail["dependencies"],
+            "incoming_relationships": [
+                {
+                    "relation_type": item.relation_type,
+                    "source_asset_id": str(item.source_asset_id),
+                    "source_name": (
+                        source_assets[item.source_asset_id].fqdn
+                        or source_assets[item.source_asset_id].hostname
+                        or source_assets[item.source_asset_id].canonical_name
+                    )
+                    if item.source_asset_id in source_assets
+                    else None,
+                    "source_role": (
+                        source_assets[item.source_asset_id].application
+                        or source_assets[item.source_asset_id].asset_type
+                    )
+                    if item.source_asset_id in source_assets
+                    else None,
+                    "source_service": next(
+                        (
+                            clean_text(observation.observed_fields_json.get("service"))
+                            for observation in observations
+                            if observation.asset_id == item.source_asset_id
+                            and clean_text(observation.observed_fields_json.get("service"))
+                        ),
+                        None,
+                    ),
+                    "evidence": item.evidence,
+                    "last_seen_at": item.last_seen_at,
+                }
+                for item in incoming
+            ],
+        }
 
     async def operational_asset_status(self, asset_id: UUID) -> dict[str, Any] | None:
         asset = await self.session.get(InventoryAssetModel, asset_id)

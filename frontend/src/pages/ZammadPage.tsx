@@ -81,7 +81,6 @@ export function ZammadPage() {
       <TextField label="Group filters (optional, comma separated)" value={form.group_filters_text} onChange={(event) => setForm({ ...form, group_filters_text: event.target.value })} />
       <FormControlLabel control={<Checkbox checked={form.tls_verify} onChange={(event) => setForm({ ...form, tls_verify: event.target.checked })} />} label="Verify TLS certificate" />
       <FormControlLabel control={<Checkbox checked={form.include_closed_tickets} onChange={(event) => setForm({ ...form, include_closed_tickets: event.target.checked })} />} label="Include closed tickets" />
-      <FormControlLabel control={<Checkbox checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />} label="Enable Zammad synchronization" />
     </Stack></CardContent><CardActions>
       {editingId && <Button onClick={() => { setEditingId(null); setForm(empty); }}>Cancel</Button>}
       <Button variant="contained" disabled={!form.name || !form.base_url || (!editingId && !form.access_token)} onClick={() => void save()}>Save</Button>
@@ -98,8 +97,7 @@ export function ZammadPage() {
       {item.last_error && <Alert severity="error" sx={{ mt: 1 }}>{item.last_error}</Alert>}
     </CardContent>{admin && <CardActions>
       <Button onClick={() => { setEditingId(item.id); setForm({ name: item.name, base_url: item.base_url, access_token: '', tls_verify: item.tls_verify, request_timeout_seconds: item.request_timeout_seconds, sync_interval_seconds: item.sync_interval_seconds, history_window_days: item.history_window_days, group_filters_text: item.group_filters.join(', '), include_closed_tickets: item.include_closed_tickets, enabled: item.enabled }); }}>Edit</Button>
-      <Button disabled={!item.enabled} onClick={() => void act(item, 'sync')}>Sync now</Button>
-      <Button variant="contained" disabled={!item.enabled || !item.token_configured} onClick={() => void act(item, 'test')}>Test connection</Button>
+      <Button variant="contained" disabled={!item.token_configured} onClick={() => void act(item, 'test')}>Test connection</Button>
     </CardActions>}</Card></Grid>)}</Grid>}
     {!loading && items.length === 0 && <Alert severity="info">Zammad is not configured. Ticket evidence will be reported as unavailable.</Alert>}
   </Stack>;

@@ -459,6 +459,7 @@ class CMDBService:
             if record.validation_status == "valid":
                 observation = await inventory.ingest_cmdb_record(record)
                 ambiguous_matches += observation.status == "ambiguous"
+        await inventory.reconcile_cmdb_relationships()
         await self.session.commit()
         return {
             "dataset_id": dataset.id,

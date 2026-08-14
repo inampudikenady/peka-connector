@@ -14,10 +14,11 @@ describe('ServiceNow connector UI', () => {
     for (const label of [
       'Instance URL', 'Username', 'Password', 'Verify TLS certificate',
       'Synchronization interval (seconds)', 'Test connection',
-      'Run synchronization now', 'Disable integration',
+      'View CMDB records',
     ]) expect(serviceNowSource).toContain(label);
     expect(serviceNowSource).toContain("password: ''");
     expect(serviceNowSource).toContain('item.counts');
+    expect(serviceNowSource).not.toContain('Disable integration');
     expect(serviceNowSource).not.toContain('dev425377');
   });
 

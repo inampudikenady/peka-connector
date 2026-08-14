@@ -34,7 +34,7 @@ def sanitize(value: Any) -> Any:
             else sanitize(item)
             for key, item in value.items()
         }
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [sanitize(item) for item in value]
     if isinstance(value, datetime):
         normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

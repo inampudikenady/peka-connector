@@ -509,7 +509,7 @@ class ZammadClient:
                     cause = next_cause
                 if isinstance(cause, socket.gaierror):
                     code, message = "DNS_FAILURE", "The Zammad hostname could not be resolved."
-                elif isinstance(cause, (ssl.SSLError, ssl.CertificateError)):
+                elif isinstance(cause, ssl.SSLError | ssl.CertificateError):
                     code, message = (
                         "TLS_FAILURE",
                         "The Zammad TLS certificate could not be validated.",
@@ -600,9 +600,13 @@ class ZammadService:
         await self.session.refresh(model)
         integrations = IntegrationService(self.session, self.encryption)
         await integrations.bootstrap_legacy_integrations()
+        await integrations.bootstrap_stream_activations()
         integration = await self._integration_for_configuration(model.id)
-        if integration.enabled != model.enabled:
-            await integrations.set_enabled(integration.id, model.enabled, None)
+        # Connection runtime follows stream selection. Saving an alternate
+        # Ticketing configuration must never bypass the confirmation contract.
+        selected = await integrations.integration_is_selected(integration.id)
+        model.enabled = selected
+        integration.enabled = selected
         integration.display_name = model.name
         integration.status = "healthy" if model.connection_state == "connected" else "attention"
         integration.last_error = model.last_error
@@ -1670,9 +1674,7 @@ class ZammadService:
             raise ZammadError("ZAMMAD_DISABLED", "The Zammad integration is disabled.", 503)
         return model
 
-    async def _enabled_integration(
-        self, *, require_synced: bool
-    ) -> ConnectorIntegrationModel:
+    async def _enabled_integration(self, *, require_synced: bool) -> ConnectorIntegrationModel:
         await IntegrationService(self.session, self.encryption).bootstrap_legacy_integrations()
         connector_id = await IntegrationService(self.session, self.encryption).connector_id()
         integration = await self.session.scalar(

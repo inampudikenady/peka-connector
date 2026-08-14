@@ -286,8 +286,8 @@ def test_compose_bundles_private_persistent_qdrant_and_release_is_consistent() -
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     version = (root / "VERSION").read_text(encoding="utf-8").strip()
     release = (root / "release.json").read_text(encoding="utf-8")
-    assert version == "1.0.2"
-    assert '"version": "1.0.2"' in release
+    assert version == "2.0.1"
+    assert '"version": "2.0.1"' in release
     assert "qdrant/qdrant:v1.14.1" in compose
     assert "peka_connector_qdrant_data:/qdrant/storage" in compose
     qdrant_service = compose.split("  qdrant:", 1)[1].split("volumes:", 1)[0]

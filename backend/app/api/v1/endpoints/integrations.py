@@ -17,7 +17,10 @@ from app.api.dependencies import (
     ZammadServiceDep,
 )
 from app.application.services.integration_catalog import CATALOG_BY_TYPE
-from app.application.services.integrations import IntegrationError
+from app.application.services.integrations import (
+    IntegrationError,
+    SourceSwitchConfirmationRequiredError,
+)
 from app.infrastructure.database.models.servicenow import ServiceNowConfigurationModel
 from app.infrastructure.scheduling import connector_scheduler
 
@@ -43,9 +46,18 @@ class IntegrationUpdateRequest(BaseModel):
 
 
 def _raise(exc: IntegrationError) -> Never:
+    detail: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+    if isinstance(exc, SourceSwitchConfirmationRequiredError):
+        detail.update(
+            {
+                "stream": exc.stream,
+                "current_source": exc.current_source,
+                "requested_source": exc.requested_source,
+            }
+        )
     raise HTTPException(
         status_code=exc.status_code,
-        detail={"code": exc.code, "message": str(exc)},
+        detail=detail,
     ) from exc
 
 
@@ -57,6 +69,39 @@ async def catalog(_: CurrentUser, service: IntegrationServiceDep) -> list[dict[s
 @router.get("")
 async def integrations(_: CurrentUser, service: IntegrationServiceDep) -> list[dict[str, Any]]:
     return await service.list_integrations()
+
+
+@router.get("/streams")
+async def streams(_: CurrentUser, service: IntegrationServiceDep) -> list[dict[str, Any]]:
+    return await service.stream_sources()
+
+
+class SourceSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool = False
+
+
+@router.post("/{integration_id}/streams/{stream}/select")
+async def select_source(
+    integration_id: UUID,
+    stream: str,
+    request: SourceSelectionRequest,
+    actor: Administrator,
+    service: IntegrationServiceDep,
+) -> dict[str, Any]:
+    try:
+        result = await service.select_source(
+            integration_id,
+            stream,
+            confirmed=request.confirmed,
+            actor=actor.username,
+        )
+        await _reconcile_zammad_schedules(service)
+        await _reconcile_servicenow_schedules(service)
+        return result
+    except IntegrationError as exc:
+        _raise(exc)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -117,7 +162,9 @@ async def test_connection(
         if model.integration_type == "zammad" and model.legacy_zammad_configuration_id:
             return await zammad.test(model.legacy_zammad_configuration_id)
         if model.integration_type == "servicenow":
-            configuration = await servicenow._active_configuration(model.id, require_enabled=True)
+            # An alternate source may be configured and tested before the user
+            # confirms switching the stream to it.
+            configuration = await servicenow._active_configuration(model.id, require_enabled=False)
             return await servicenow.test(configuration.id)
         legacy_id = model.configuration_json.get("legacy_id")
         if model.integration_type == "prometheus" and legacy_id:

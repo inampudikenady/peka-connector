@@ -155,3 +155,18 @@ async def integration_status(
         if item["id"] == str(configuration_id):
             return item
     return await service.status(configuration_id)
+
+
+@router.get("/configurations/{configuration_id}/cmdb")
+async def cmdb_observability(
+    configuration_id: UUID,
+    _: CurrentUser,
+    service: ServiceNowServiceDep,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict[str, Any]:
+    return await service.cmdb_observability(
+        configuration_id,
+        page=max(1, page),
+        page_size=min(max(1, page_size), 100),
+    )

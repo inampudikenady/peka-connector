@@ -5,11 +5,17 @@ import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
 
-from app.application.services.integrations import IntegrationService
+from app.application.services.cmdb_sources import CMDBSourceService
+from app.application.services.integrations import (
+    IntegrationService,
+    SourceSwitchConfirmationRequiredError,
+)
 from app.application.services.ticketing import TICKETING_TOOL_NAMES, TicketingProviderService
 from app.application.services.zammad import ZammadError, ZammadService, normalize_ticket
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.models.integration import ConnectorIntegrationModel
+from app.infrastructure.database.models.inventory import InventoryAssetModel
+from app.infrastructure.database.models.servicenow import ServiceNowCIModel
 from app.infrastructure.database.models.zammad import ZammadConfigurationModel, ZammadTicketModel
 from app.infrastructure.database.session import engine, session_factory
 from app.infrastructure.scheduling import ConnectorScheduler
@@ -85,16 +91,15 @@ async def test_enabled_integrations_coexist_without_active_provider_state() -> N
         await session.commit()
 
         integrations = await service.list_integrations()
-        enabled = {
-            item["integration_type"] for item in integrations if item["enabled"]
-        }
+        enabled = {item["integration_type"] for item in integrations if item["enabled"]}
         assert {"zammad", "servicenow"} <= enabled
         assert all("active_provider_role" not in item for item in integrations)
         assert all("provider_generation" not in item for item in integrations)
         assert (await zammad.search_tickets({"query": "memory"}))["count"] == 1
-        assert await TicketingProviderService(
-            session, _encryption()
-        ).active_tool_names() == TICKETING_TOOL_NAMES
+        assert (
+            await TicketingProviderService(session, _encryption()).active_tool_names()
+            == TICKETING_TOOL_NAMES
+        )
         assert zammad_integration.enabled is True
 
 
@@ -123,6 +128,155 @@ async def test_connection_success_does_not_report_unsynchronized_integration_hea
 
 
 @pytest.mark.asyncio
+async def test_ticketing_source_switch_requires_confirmation_and_is_atomic() -> None:
+    await _reset_database()
+    async with session_factory() as session:
+        service = IntegrationService(session, _encryption())
+        servicenow = await service.create(
+            {"integration_type": "servicenow", "display_name": "ServiceNow", "enabled": True},
+            "admin",
+        )
+        zammad = await service.create(
+            {"integration_type": "zammad", "display_name": "Zammad", "enabled": True},
+            "admin",
+        )
+        with pytest.raises(SourceSwitchConfirmationRequiredError):
+            await service.select_source(
+                UUID(zammad["id"]), "ticketing", confirmed=False, actor="admin"
+            )
+        before = await service.stream_sources()
+        ticketing = next(item for item in before if item["stream"] == "ticketing")
+        assert [item["source_key"] for item in ticketing["sources"] if item["selected"]] == [
+            "servicenow"
+        ]
+
+        switched = await service.select_source(
+            UUID(zammad["id"]), "ticketing", confirmed=True, actor="admin"
+        )
+        assert switched["previous_source"] == "servicenow"
+        after = await service.stream_sources()
+        ticketing = next(item for item in after if item["stream"] == "ticketing")
+        assert [
+            item["source_key"] for item in ticketing["sources"] if item["selected"]
+        ] == ["zammad"]
+        assert all(item["configured"] for item in ticketing["sources"])
+        assert servicenow["id"] != zammad["id"]
+
+
+@pytest.mark.asyncio
+async def test_servicenow_capabilities_activate_independently_from_connection() -> None:
+    await _reset_database()
+    async with session_factory() as session:
+        service = IntegrationService(session, _encryption())
+        servicenow = await service.create(
+            {"integration_type": "servicenow", "display_name": "ServiceNow", "enabled": True},
+            "admin",
+        )
+        local = await service.create(
+            {"integration_type": "generic_cmdb", "display_name": "Local CMDB", "enabled": True},
+            "admin",
+        )
+        await service.select_source(UUID(local["id"]), "cmdb", confirmed=True, actor="admin")
+        streams = await service.stream_sources()
+        assert (
+            next(item for item in streams if item["stream"] == "ticketing")["selected_source"]
+            == "servicenow"
+        )
+        assert (
+            next(item for item in streams if item["stream"] == "cmdb")["selected_source"]
+            == "local_cmdb"
+        )
+
+        zammad = await service.create(
+            {"integration_type": "zammad", "display_name": "Zammad", "enabled": True},
+            "admin",
+        )
+        await service.select_source(
+            UUID(zammad["id"]), "ticketing", confirmed=True, actor="admin"
+        )
+        await service.select_source(
+            UUID(servicenow["id"]), "cmdb", confirmed=True, actor="admin"
+        )
+        streams = await service.stream_sources()
+        assert (
+            next(item for item in streams if item["stream"] == "ticketing")["selected_source"]
+            == "zammad"
+        )
+        assert (
+            next(item for item in streams if item["stream"] == "cmdb")["selected_source"]
+            == "servicenow_cmdb"
+        )
+
+
+@pytest.mark.asyncio
+async def test_cmdb_switch_routes_only_to_active_source_and_classifies_servers() -> None:
+    await _reset_database()
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        integrations = IntegrationService(session, _encryption())
+        servicenow = await integrations.create(
+            {"integration_type": "servicenow", "display_name": "ServiceNow", "enabled": True},
+            "admin",
+        )
+        local = await integrations.create(
+            {"integration_type": "generic_cmdb", "display_name": "Local CMDB", "enabled": True},
+            "admin",
+        )
+        session.add(
+            InventoryAssetModel(
+                canonical_name="local.example.test",
+                hostname="local",
+                asset_type="server",
+                operating_system="Linux",
+            )
+        )
+        session.add_all(
+            [
+                ServiceNowCIModel(
+                    tenant_id="tenant",
+                    connector_id="local-connector",
+                    integration_id=UUID(servicenow["id"]),
+                    external_id="sn-server",
+                    external_sys_id="sn-server",
+                    sys_class_name="cmdb_ci_linux_server",
+                    name="sn-server",
+                    fqdn="sn-server.example.test",
+                    source_updated_at=now,
+                    fields_json={"os": "Linux"},
+                ),
+                ServiceNowCIModel(
+                    tenant_id="tenant",
+                    connector_id="local-connector",
+                    integration_id=UUID(servicenow["id"]),
+                    external_id="sn-container",
+                    external_sys_id="sn-container",
+                    sys_class_name="cmdb_ci_container",
+                    name="sn-container",
+                    source_updated_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+        cmdb = CMDBSourceService(session, _encryption())
+        await integrations.select_source(
+            UUID(servicenow["id"]), "cmdb", confirmed=True, actor="admin"
+        )
+        servicenow_rows = await cmdb.search_assets(asset_class="server", limit=50)
+        assert [row["canonical_name"] for row in servicenow_rows] == [
+            "sn-server.example.test"
+        ]
+        assert all(row["source"] == "ServiceNow CMDB" for row in servicenow_rows)
+
+        await integrations.select_source(
+            UUID(local["id"]), "cmdb", confirmed=True, actor="admin"
+        )
+        local_rows = await cmdb.search_assets(asset_class="server", limit=50)
+        assert [row["canonical_name"] for row in local_rows] == ["local.example.test"]
+        assert all(row["source"] == "Local CMDB" for row in local_rows)
+
+
+@pytest.mark.asyncio
 async def test_disabling_zammad_stops_schedule_without_hiding_cached_records() -> None:
     await _reset_database()
     async with session_factory() as session:
@@ -139,9 +293,7 @@ async def test_disabling_zammad_stops_schedule_without_hiding_cached_records() -
             await scheduler.reconcile_zammad(configuration.id)
             assert scheduler._scheduler.get_job(f"zammad:{configuration.id}") is None
             cached = await session.scalar(
-                select(ZammadTicketModel).where(
-                    ZammadTicketModel.integration_id == integration.id
-                )
+                select(ZammadTicketModel).where(ZammadTicketModel.integration_id == integration.id)
             )
             assert cached is not None
             assert cached.cache_status == "active"
@@ -224,15 +376,16 @@ async def test_legacy_bootstrap_preserves_encrypted_zammad_secret_and_tools() ->
 
         service = IntegrationService(session, encryption)
         await service.bootstrap_legacy_integrations()
-        integration = await ZammadService(
-            session, encryption
-        )._enabled_integration(require_synced=True)
+        integration = await ZammadService(session, encryption)._enabled_integration(
+            require_synced=True
+        )
 
         preserved = await session.get(ZammadConfigurationModel, configuration.id)
         assert preserved is not None
         assert preserved.encrypted_access_token == encrypted_token
         assert encryption.decrypt(preserved.encrypted_access_token) == "existing-customer-token"
         assert integration.legacy_zammad_configuration_id == configuration.id
-        assert await TicketingProviderService(
-            session, encryption
-        ).active_tool_names() == TICKETING_TOOL_NAMES
+        assert (
+            await TicketingProviderService(session, encryption).active_tool_names()
+            == TICKETING_TOOL_NAMES
+        )

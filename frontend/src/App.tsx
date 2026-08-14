@@ -22,6 +22,7 @@ const PrometheusPage = lazy(() => import('./pages/PrometheusPage').then((module)
 const LokiPage = lazy(() => import('./pages/LokiPage').then((module) => ({ default: module.LokiPage })));
 const ZammadPage = lazy(() => import('./pages/ZammadPage').then((module) => ({ default: module.ZammadPage })));
 const ServiceNowPage = lazy(() => import('./pages/ServiceNowPage').then((module) => ({ default: module.ServiceNowPage })));
+const ServiceNowCMDBPage = lazy(() => import('./pages/ServiceNowCMDBPage').then((module) => ({ default: module.ServiceNowCMDBPage })));
 const InventoryPage = lazy(() => import('./pages/InventoryPage').then((module) => ({ default: module.InventoryPage })));
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage').then((module) => ({ default: module.DiagnosticsPage })));
 const UsersPage = lazy(() => import('./pages/UsersPage').then((module) => ({ default: module.UsersPage })));
@@ -45,6 +46,7 @@ function Application() {
     <Route path="/loki" element={<LokiPage />} />
     <Route path="/zammad" element={<ZammadPage />} />
     <Route path="/servicenow" element={<ServiceNowPage />} />
+    <Route path="/servicenow/:configurationId/cmdb" element={<ServiceNowCMDBPage />} />
     <Route path="/inventory" element={<InventoryPage />} />
     <Route path="/activity" element={<ActivityPage />} />
     <Route path="/operational-requests" element={<Navigate to="/activity?tab=requests" replace />} />

@@ -1,6 +1,9 @@
 from app.infrastructure.database.models.certificate import TrustedCertificateAuthorityModel
 from app.infrastructure.database.models.document import DocumentDeliveryJobModel, DocumentModel
-from app.infrastructure.database.models.integration import ConnectorIntegrationModel
+from app.infrastructure.database.models.integration import (
+    ConnectorIntegrationModel,
+    IntegrationStreamActivationModel,
+)
 from app.infrastructure.database.models.inventory import (
     CMDBDatasetModel,
     CMDBDatasetVersionModel,
@@ -56,6 +59,7 @@ __all__ = [
     "InventoryObservationModel",
     "InventoryServiceModel",
     "ConnectorIntegrationModel",
+    "IntegrationStreamActivationModel",
     "LokiConfigurationModel",
     "PrometheusConfigurationModel",
     "ProductSettingsModel",

@@ -87,6 +87,12 @@ def test_existing_zammad_migrates_without_obsolete_provider_binding(
             ).fetchall()
         }
         assert "connector_provider_bindings" not in tables
+        activation = connection.execute(
+            "SELECT stream, source_key, enabled, active "
+            "FROM integration_stream_activations WHERE integration_id=?",
+            (integration[0],),
+        ).fetchone()
+        assert activation == ("ticketing", "zammad", 1, 1)
         cache = connection.execute(
             "SELECT integration_id, integration_type, cache_status "
             "FROM zammad_tickets WHERE number='11007'"
@@ -97,5 +103,64 @@ def test_existing_zammad_migrates_without_obsolete_provider_binding(
             "WHERE id='11111111111111111111111111111111'"
         ).fetchone()
         assert secret == ("encrypted-ciphertext-preserved",)
+    finally:
+        connection.close()
+
+
+def test_v2_stream_state_prefers_active_source_and_retains_alternate_configuration(
+    tmp_path: Path,
+) -> None:
+    backend = Path(__file__).resolve().parents[2]
+    database = tmp_path / "selected-source-migration.db"
+    _alembic(backend, database, "20260813_0017")
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript(
+            """
+            INSERT INTO connector_integrations
+              (id, connector_id, integration_type, display_name, category, enabled, status,
+               configuration_json, capabilities_json, initial_sync_status, created_at, updated_at)
+            VALUES
+              ('11111111111111111111111111111111', 'connector-a', 'servicenow',
+               'ServiceNow', 'Ticketing / CMDB', 1, 'healthy', '{}',
+               '{"incidents": true, "cmdb": false}', 'completed',
+               '2026-08-13 09:00:00', '2026-08-13 09:00:00'),
+              ('22222222222222222222222222222222', 'connector-a', 'zammad',
+               'Zammad', 'Ticketing', 1, 'configured', '{}', '{"tickets": true}',
+               'not_started', '2026-08-13 10:00:00', '2026-08-13 10:00:00');
+
+            INSERT INTO integration_stream_activations
+              (id, connector_id, integration_id, stream, source_key, source_name,
+               enabled, active, activated_at, created_at, updated_at)
+            VALUES
+              ('33333333333333333333333333333333', 'connector-a',
+               '11111111111111111111111111111111', 'ticketing', 'servicenow',
+               'ServiceNow', 1, 1, '2026-08-13 09:00:00',
+               '2026-08-13 09:00:00', '2026-08-13 09:00:00'),
+              ('44444444444444444444444444444444', 'connector-a',
+               '22222222222222222222222222222222', 'ticketing', 'zammad',
+               'Zammad', 1, 0, NULL, '2026-08-13 10:00:00', '2026-08-13 10:00:00');
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    _alembic(backend, database, "head")
+    connection = sqlite3.connect(database)
+    try:
+        activations = connection.execute(
+            "SELECT source_key, enabled, active FROM integration_stream_activations "
+            "WHERE stream='ticketing' ORDER BY source_key"
+        ).fetchall()
+        assert activations == [("servicenow", 1, 1), ("zammad", 0, 0)]
+        integrations = connection.execute(
+            "SELECT integration_type, enabled, configuration_json "
+            "FROM connector_integrations ORDER BY integration_type"
+        ).fetchall()
+        assert integrations == [
+            ("servicenow", 1, "{}"),
+            ("zammad", 0, "{}"),
+        ]
     finally:
         connection.close()

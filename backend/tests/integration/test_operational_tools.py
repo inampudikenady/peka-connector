@@ -6,6 +6,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from app.application.services.inventory import InventoryService
 from app.application.services.knowledge import KnowledgeSearchResult
 from app.application.services.operational_tools import (
     OperationalToolExecutor,
@@ -16,6 +17,7 @@ from app.domain.ports.saas import OperationalToolRequest, OperationalToolResult
 from app.infrastructure.database.base import Base
 from app.infrastructure.database.models.inventory import (
     InventoryAssetModel,
+    InventoryIdentityModel,
     InventoryObservationModel,
     PrometheusConfigurationModel,
 )
@@ -187,6 +189,232 @@ async def test_inventory_tools_count_lookup_status_filter_and_tenant_local_data(
         assert status["asset"]["reachable"] is True
         assert status["assessment"]["overall_health"] == "unknown"
         assert [asset["hostname"] for asset in missing["assets"]] == ["win001"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_relationship_tool_resolves_cmdb_id_and_hosted_service():
+    await _reset_database()
+    async with session_factory() as session:
+        host = InventoryAssetModel(
+            canonical_name="util001.demo.internal",
+            hostname="util001",
+            fqdn="util001.demo.internal",
+            primary_ip="172.16.165.12",
+            asset_type="Linux Docker Host",
+        )
+        service = InventoryAssetModel(
+            canonical_name="prometheus.demo.internal",
+            hostname="prometheus",
+            fqdn="prometheus.demo.internal",
+            application="Prometheus",
+            asset_type="Docker Container",
+        )
+        session.add_all([host, service])
+        await session.flush()
+        host_observation = InventoryObservationModel(
+            asset_id=host.id,
+            source_type="cmdb",
+            source_record_id="host-row",
+            observed_fields_json={"source_record_key": "SRV-UTIL001"},
+            raw_reference="cmdb:test:host",
+            raw_checksum="b" * 64,
+        )
+        service_observation = InventoryObservationModel(
+            asset_id=service.id,
+            source_type="cmdb",
+            source_record_id="service-row",
+            observed_fields_json={
+                "source_record_key": "CTR-PROMETHEUS",
+                "hosted_on": "SRV-UTIL001",
+                "service": "Prometheus",
+            },
+            raw_reference="cmdb:test:service",
+            raw_checksum="c" * 64,
+        )
+        session.add_all([host_observation, service_observation])
+        await session.flush()
+        session.add(
+            InventoryIdentityModel(
+                asset_id=host.id,
+                observation_id=host_observation.id,
+                identity_type="cmdb_id",
+                original_value="SRV-UTIL001",
+                normalized_value="srv-util001",
+                source_type="cmdb",
+            )
+        )
+        await session.flush()
+        await InventoryService(session).reconcile_cmdb_relationships()
+        await session.commit()
+        executor = OperationalToolExecutor(
+            session,
+            get_settings(),
+            SecretEncryptionService(get_settings().encryption_key),
+        )
+
+        by_hostname = await executor.execute(
+            _request("get_asset_relationships", {"identifier": "util001"})
+        )
+        by_cmdb_id = await executor.execute(
+            _request("get_asset_relationships", {"identifier": "SRV-UTIL001"})
+        )
+
+        assert by_hostname["match_status"] == "found"
+        assert by_cmdb_id["asset"]["id"] == by_hostname["asset"]["id"]
+        hosted = by_hostname["relationships"]["incoming_relationships"]
+        assert hosted[0]["source_service"] == "Prometheus"
+        assert hosted[0]["relation_type"] == "hosted_on"
+
+
+@pytest.mark.asyncio
+async def test_infrastructure_assessment_keeps_partial_multisource_evidence(monkeypatch):
+    await _reset_database()
+    async with session_factory() as session:
+        asset = InventoryAssetModel(
+            canonical_name="win001.demo.internal",
+            hostname="win001",
+            fqdn="win001.demo.internal",
+            primary_ip="172.16.165.21",
+            asset_type="Windows Server",
+        )
+        session.add(asset)
+        await session.flush()
+        session.add(
+            InventoryObservationModel(
+                asset_id=asset.id,
+                source_type="prometheus",
+                source_record_id="prom-win001",
+                observed_fields_json={"health": "down"},
+                raw_reference="prometheus:test",
+                raw_checksum="d" * 64,
+            )
+        )
+        await session.commit()
+        executor = OperationalToolExecutor(
+            session,
+            get_settings(),
+            SecretEncryptionService(get_settings().encryption_key),
+        )
+
+        async def logs(*_args, **_kwargs):
+            return {
+                "available": True,
+                "counts_by_category": {},
+                "evidence": [],
+            }
+
+        async def ticketing(_arguments):
+            return {
+                "active_source": "servicenow",
+                "providers": [
+                    {
+                        "source": "servicenow",
+                        "records": [
+                            {
+                                "number": "PRB0040002",
+                                "record_type": "problem",
+                                "active": True,
+                                "state": "Open",
+                                "ci_name": "win001.demo.internal",
+                                "short_description": "Exporter availability failures",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(executor.loki, "asset_evidence", logs)
+        monkeypatch.setattr(executor.ticketing, "search_enabled_records", ticketing)
+        result = await executor.execute(
+            _request("assess_infrastructure", {"limit": 50, "lookback_hours": 24})
+        )
+
+        assert result["issue_count"] == 1
+        issue = result["issues"][0]
+        assert issue["entity"] == "win001.demo.internal"
+        assert issue["prometheus"]["health"] == "unhealthy"
+        assert issue["loki"]["evidence"] == []
+        assert issue["servicenow"]["problems"][0]["number"] == "PRB0040002"
+        assert issue["servicenow"]["incidents"] == []
+
+
+@pytest.mark.asyncio
+async def test_entity_investigation_attempts_every_operational_source(monkeypatch):
+    await _reset_database()
+    async with session_factory() as session:
+        asset = InventoryAssetModel(
+            canonical_name="util001.demo.internal",
+            hostname="util001",
+            fqdn="util001.demo.internal",
+            primary_ip="172.16.165.12",
+            asset_type="Linux Docker Host",
+        )
+        session.add(asset)
+        await session.flush()
+        session.add(
+            InventoryObservationModel(
+                asset_id=asset.id,
+                source_type="prometheus",
+                source_record_id="prom-util001",
+                observed_fields_json={"health": "up"},
+                raw_reference="prometheus:test",
+                raw_checksum="e" * 64,
+            )
+        )
+        await session.commit()
+        executor = OperationalToolExecutor(
+            session,
+            get_settings(),
+            SecretEncryptionService(get_settings().encryption_key),
+        )
+        attempted: list[str] = []
+
+        async def metrics(_asset):
+            attempted.append("prometheus")
+            return {
+                "available": True,
+                "cpu_percent": 12.0,
+                "memory_percent": 34.0,
+                "disk_percent": 45.0,
+                "metric_timestamp": datetime.now(UTC),
+            }
+
+        async def logs(*_args, **_kwargs):
+            attempted.append("loki")
+            return {
+                "available": True,
+                "counts_by_category": {},
+                "evidence": [],
+                "matched_streams": [],
+                "last_log_at": None,
+            }
+
+        async def tickets(_arguments):
+            attempted.append("ticketing")
+            return {
+                "availability": {"enabled": True},
+                "open_tickets": [],
+                "recently_closed_tickets": [],
+            }
+
+        monkeypatch.setattr(executor.prometheus, "asset_utilization", metrics)
+        monkeypatch.setattr(executor.loki, "asset_evidence", logs)
+        monkeypatch.setattr(executor.ticketing, "get_asset_tickets", tickets)
+        result = await executor.execute(
+            _request(
+                "get_asset_status",
+                {
+                    "identifier": "util001",
+                    "mode": "health",
+                    "detail_level": "detailed",
+                },
+            )
+        )
+
+        assert result["match_status"] == "found"
+        assert attempted == ["prometheus", "loki", "ticketing"]
+        assert result["log_evidence"]["evidence"] == []
+        assert "servicenow_records" not in result
 
 
 @pytest.mark.asyncio

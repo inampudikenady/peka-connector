@@ -6,7 +6,7 @@ into the installed Python package metadata, adds it to the OCI image labels, and
 same runtime value through health, overview, diagnostics, registration, heartbeat, and document
 delivery metadata. The About page reads the health API rather than maintaining its own version.
 
-The customer-resident data-plane baseline is `1.0.2`. It bundles Qdrant `1.14.1`; the shipped
+The customer-resident data-plane baseline is `2.0.1`. It bundles Qdrant `1.14.1`; the shipped
 component mapping is recorded in `release.json` and exposed by `/api/v1/version`.
 
 Accepted versions use semantic/PEP 440 syntax, including releases such as `0.3.0`, pre-releases

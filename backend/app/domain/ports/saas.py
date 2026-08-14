@@ -5,9 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-ConnectorCapabilityName = Literal[
-    "filesystem_documents", "operational_tools", "local_knowledge"
-]
+ConnectorCapabilityName = Literal["filesystem_documents", "operational_tools", "local_knowledge"]
 
 
 class ConnectorRegistrationRequest(BaseModel):
@@ -135,6 +133,8 @@ class OperationalToolRequest(BaseModel):
         "get_asset_status",
         "get_asset_utilization",
         "get_asset_log_evidence",
+        "get_asset_relationships",
+        "assess_infrastructure",
         "search_tickets",
         "get_ticket",
         "get_ticket_counts",

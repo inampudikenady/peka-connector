@@ -14,8 +14,13 @@ from app.application.services.integration_catalog import (
     CATALOG_BY_TYPE,
     INTEGRATION_CATALOG,
     SECRET_FIELDS,
+    STREAM_SOURCES,
+    STREAMS,
 )
-from app.infrastructure.database.models.integration import ConnectorIntegrationModel
+from app.infrastructure.database.models.integration import (
+    ConnectorIntegrationModel,
+    IntegrationStreamActivationModel,
+)
 from app.infrastructure.database.models.inventory import (
     CMDBDatasetModel,
     LokiConfigurationModel,
@@ -23,10 +28,7 @@ from app.infrastructure.database.models.inventory import (
 )
 from app.infrastructure.database.models.operations import AuditEventModel, ProductSettingsModel
 from app.infrastructure.database.models.servicenow import (
-    ServiceNowCIModel,
     ServiceNowConfigurationModel,
-    ServiceNowRecordModel,
-    ServiceNowRelationshipModel,
 )
 from app.infrastructure.database.models.source import SourceModel
 from app.infrastructure.database.models.zammad import (
@@ -43,6 +45,26 @@ class IntegrationError(Exception):
         self.status_code = status_code
 
 
+class SourceSwitchConfirmationRequiredError(IntegrationError):
+    def __init__(
+        self,
+        stream: str,
+        current_source: str,
+        requested_source: str,
+    ) -> None:
+        super().__init__(
+            "SOURCE_SWITCH_CONFIRMATION_REQUIRED",
+            f"{current_source} is currently selected as the {stream.title()} source. "
+            f"Switching to {requested_source} will stop PEKA from using {current_source} "
+            f"for {stream.title()} and select {requested_source}. Saved configuration "
+            "will be retained.",
+            409,
+        )
+        self.stream = stream
+        self.current_source = current_source
+        self.requested_source = requested_source
+
+
 class IntegrationService:
     def __init__(self, session: AsyncSession, encryption: SecretEncryptionService) -> None:
         self.session = session
@@ -53,6 +75,20 @@ class IntegrationService:
         if product is None:
             return "local"
         return str(product.connector_id or product.instance_id or "local")
+
+    @staticmethod
+    def _stream_sources_for(
+        integration_type: str, capabilities: dict[str, bool]
+    ) -> tuple[tuple[str, str, str], ...]:
+        values = STREAM_SOURCES.get(integration_type, ())
+        if integration_type != "servicenow":
+            return values
+        return tuple(
+            item
+            for item in values
+            if (item[0] == "ticketing" and capabilities.get("incidents", False))
+            or (item[0] == "cmdb" and capabilities.get("cmdb", False))
+        )
 
     async def catalog(self) -> list[dict[str, Any]]:
         return [dict(item) for item in INTEGRATION_CATALOG]
@@ -184,7 +220,7 @@ class IntegrationService:
         if cmdb_count:
             await add_if_missing(
                 "generic_cmdb",
-                "Generic CMDB",
+                "Local CMDB",
                 True,
                 "healthy",
                 {"legacy_id": "generic_cmdb", "dataset_count": cmdb_count},
@@ -193,6 +229,7 @@ class IntegrationService:
 
     async def list_integrations(self) -> list[dict[str, Any]]:
         await self.bootstrap_legacy_integrations()
+        await self.bootstrap_stream_activations()
         connector_id = await self.connector_id()
         rows = list(
             (
@@ -204,6 +241,242 @@ class IntegrationService:
             ).all()
         )
         return [self._response(item) for item in rows]
+
+    async def bootstrap_stream_activations(self) -> None:
+        """Backfill capability rows for integrations created outside the generic API."""
+        connector_id = await self.connector_id()
+        integrations = list(
+            (
+                await self.session.scalars(
+                    select(ConnectorIntegrationModel).where(
+                        ConnectorIntegrationModel.connector_id == connector_id
+                    )
+                )
+            ).all()
+        )
+        changed = False
+        for integration in integrations:
+            for stream, source_key, source_name in self._stream_sources_for(
+                integration.integration_type, integration.capabilities_json
+            ):
+                existing = await self.session.scalar(
+                    select(IntegrationStreamActivationModel).where(
+                        IntegrationStreamActivationModel.connector_id == connector_id,
+                        IntegrationStreamActivationModel.stream == stream,
+                        IntegrationStreamActivationModel.source_key == source_key,
+                    )
+                )
+                if existing is not None:
+                    continue
+                selected = False
+                if integration.enabled:
+                    current = await self.session.scalar(
+                        select(IntegrationStreamActivationModel.id).where(
+                            IntegrationStreamActivationModel.connector_id == connector_id,
+                            IntegrationStreamActivationModel.stream == stream,
+                            IntegrationStreamActivationModel.active.is_(True),
+                        )
+                    )
+                    selected = current is None
+                self.session.add(
+                    IntegrationStreamActivationModel(
+                        connector_id=connector_id,
+                        integration_id=integration.id,
+                        stream=stream,
+                        source_key=source_key,
+                        source_name=source_name,
+                        enabled=selected,
+                        active=selected,
+                        activated_at=datetime.now(UTC) if selected else None,
+                    )
+                )
+                await self.session.flush()
+                changed = True
+        for integration in integrations:
+            selected = await self.integration_is_selected(integration.id)
+            if integration.enabled != selected:
+                await self._set_connection_enabled(integration, selected)
+                changed = True
+        if changed:
+            await self.session.commit()
+
+    async def stream_sources(self) -> list[dict[str, Any]]:
+        await self.bootstrap_legacy_integrations()
+        await self.bootstrap_stream_activations()
+        connector_id = await self.connector_id()
+        rows = list(
+            (
+                await self.session.execute(
+                    select(IntegrationStreamActivationModel, ConnectorIntegrationModel)
+                    .join(
+                        ConnectorIntegrationModel,
+                        ConnectorIntegrationModel.id
+                        == IntegrationStreamActivationModel.integration_id,
+                    )
+                    .where(IntegrationStreamActivationModel.connector_id == connector_id)
+                    .order_by(
+                        IntegrationStreamActivationModel.stream,
+                        IntegrationStreamActivationModel.source_name,
+                    )
+                )
+            ).all()
+        )
+        by_stream: dict[str, list[dict[str, Any]]] = {stream: [] for stream in STREAMS}
+        for activation, integration in rows:
+            by_stream[activation.stream].append(
+                {
+                    "activation_id": str(activation.id),
+                    "integration_id": str(integration.id),
+                    "source_key": activation.source_key,
+                    "source_name": activation.source_name,
+                    "configured": True,
+                    "selected": activation.active and activation.enabled,
+                    "status": integration.status,
+                    "last_successful_sync_at": integration.last_successful_sync_at,
+                    "last_error": integration.last_error,
+                }
+            )
+        return [
+            {
+                "stream": stream,
+                "display_name": stream.title() if stream != "cmdb" else "CMDB",
+                "selected_source": next(
+                    (item["source_key"] for item in by_stream[stream] if item["selected"]), None
+                ),
+                "sources": by_stream[stream],
+            }
+            for stream in STREAMS
+        ]
+
+    async def active_source(self, stream: str) -> IntegrationStreamActivationModel | None:
+        if stream not in STREAMS:
+            raise IntegrationError("UNKNOWN_STREAM", "Integration stream is not supported.")
+        await self.bootstrap_stream_activations()
+        connector_id = await self.connector_id()
+        return await self.session.scalar(
+            select(IntegrationStreamActivationModel)
+            .join(
+                ConnectorIntegrationModel,
+                ConnectorIntegrationModel.id == IntegrationStreamActivationModel.integration_id,
+            )
+            .where(
+                IntegrationStreamActivationModel.connector_id == connector_id,
+                IntegrationStreamActivationModel.stream == stream,
+                IntegrationStreamActivationModel.active.is_(True),
+                IntegrationStreamActivationModel.enabled.is_(True),
+            )
+        )
+
+    async def integration_is_selected(self, integration_id: UUID) -> bool:
+        return (
+            await self.session.scalar(
+                select(IntegrationStreamActivationModel.id).where(
+                    IntegrationStreamActivationModel.integration_id == integration_id,
+                    IntegrationStreamActivationModel.active.is_(True),
+                    IntegrationStreamActivationModel.enabled.is_(True),
+                )
+            )
+            is not None
+        )
+
+    async def select_source(
+        self,
+        integration_id: UUID,
+        stream: str,
+        *,
+        confirmed: bool,
+        actor: str | None,
+    ) -> dict[str, Any]:
+        await self.bootstrap_stream_activations()
+        integration = await self.get(integration_id)
+        requested = await self.session.scalar(
+            select(IntegrationStreamActivationModel)
+            .where(
+                IntegrationStreamActivationModel.integration_id == integration.id,
+                IntegrationStreamActivationModel.stream == stream,
+            )
+            .with_for_update()
+        )
+        if requested is None:
+            raise IntegrationError(
+                "SOURCE_NOT_AVAILABLE_FOR_STREAM",
+                f"{integration.display_name} is not a source for {stream.title()}.",
+                409,
+            )
+        stream_rows = list(
+            (
+                await self.session.scalars(
+                    select(IntegrationStreamActivationModel)
+                    .where(
+                        IntegrationStreamActivationModel.connector_id
+                        == requested.connector_id,
+                        IntegrationStreamActivationModel.stream == stream,
+                    )
+                    .with_for_update()
+                )
+            ).all()
+        )
+        current = next((item for item in stream_rows if item.active), None)
+        if current is not None and current.id != requested.id and not confirmed:
+            raise SourceSwitchConfirmationRequiredError(
+                stream, current.source_name, requested.source_name
+            )
+        if not CATALOG_BY_TYPE[integration.integration_type].get("available"):
+            raise IntegrationError("ADAPTER_UNAVAILABLE", "This source is unavailable.", 409)
+        now = datetime.now(UTC)
+        previous_integration_id = current.integration_id if current else None
+        if current is not None and current.id != requested.id:
+            await self.session.execute(
+                update(IntegrationStreamActivationModel)
+                .where(
+                    IntegrationStreamActivationModel.connector_id == requested.connector_id,
+                    IntegrationStreamActivationModel.stream == stream,
+                    IntegrationStreamActivationModel.active.is_(True),
+                )
+                .values(active=False, enabled=False)
+                .execution_options(synchronize_session="fetch")
+            )
+            await self.session.flush()
+        requested.enabled = True
+        requested.active = True
+        requested.activated_at = now
+        await self._set_connection_enabled(integration, True)
+        if previous_integration_id and previous_integration_id != integration.id:
+            remaining = await self.session.scalar(
+                select(IntegrationStreamActivationModel.id).where(
+                    IntegrationStreamActivationModel.integration_id
+                    == previous_integration_id,
+                    IntegrationStreamActivationModel.active.is_(True),
+                )
+            )
+            if remaining is None:
+                previous_integration = await self.session.get(
+                    ConnectorIntegrationModel, previous_integration_id
+                )
+                if previous_integration is not None:
+                    await self._set_connection_enabled(previous_integration, False)
+        self._audit(
+            "integration.source_selected",
+            integration,
+            actor,
+            f"{requested.source_name} selected for {stream}",
+            {
+                "stream": stream,
+                "source": requested.source_key,
+                "previous_source": (
+                    current.source_key if current and current.id != requested.id else None
+                ),
+            },
+        )
+        await self.session.commit()
+        return {
+            "stream": stream,
+            "selected_source": requested.source_key,
+            "source_name": requested.source_name,
+            "previous_source": (
+                current.source_key if current and current.id != requested.id else None
+            ),
+        }
 
     async def get(self, integration_id: UUID) -> ConnectorIntegrationModel:
         connector_id = await self.connector_id()
@@ -242,6 +515,40 @@ class IntegrationService:
         )
         self.session.add(model)
         await self.session.flush()
+        for stream, source_key, source_name in self._stream_sources_for(
+            integration_type, model.capabilities_json
+        ):
+            current = await self.session.scalar(
+                select(IntegrationStreamActivationModel.id).where(
+                    IntegrationStreamActivationModel.connector_id == model.connector_id,
+                    IntegrationStreamActivationModel.stream == stream,
+                    IntegrationStreamActivationModel.active.is_(True),
+                )
+            )
+            selected = model.enabled and current is None
+            self.session.add(
+                IntegrationStreamActivationModel(
+                    connector_id=model.connector_id,
+                    integration_id=model.id,
+                    stream=stream,
+                    source_key=source_key,
+                    source_name=source_name,
+                    enabled=selected,
+                    active=selected,
+                    activated_at=datetime.now(UTC) if selected else None,
+                )
+            )
+            await self.session.flush()
+        selected_count = int(
+            await self.session.scalar(
+                select(func.count(IntegrationStreamActivationModel.id)).where(
+                    IntegrationStreamActivationModel.integration_id == model.id,
+                    IntegrationStreamActivationModel.active.is_(True),
+                )
+            )
+            or 0
+        )
+        model.enabled = selected_count > 0
         self._audit("integration.created", model, actor, "Integration created")
         await self.session.commit()
         return self._response(model)
@@ -278,15 +585,43 @@ class IntegrationService:
         self, integration_id: UUID, enabled: bool, actor: str | None
     ) -> dict[str, Any]:
         model = await self.get(integration_id)
-        if enabled and not CATALOG_BY_TYPE[model.integration_type].get("available"):
+        sources = self._stream_sources_for(
+            model.integration_type, model.capabilities_json
+        )
+        if len(sources) != 1:
             raise IntegrationError(
-                "ADAPTER_UNAVAILABLE",
-                str(
-                    CATALOG_BY_TYPE[model.integration_type].get("unavailable_reason")
-                    or "The integration adapter is unavailable."
-                ),
+                "STREAM_SELECTION_REQUIRED",
+                "Select or unselect ServiceNow separately for Ticketing or CMDB.",
                 409,
             )
+        if enabled:
+            await self.select_source(
+                integration_id, sources[0][0], confirmed=False, actor=actor
+            )
+            return self._response(model)
+        model.enabled = False
+        await self.session.execute(
+            update(IntegrationStreamActivationModel)
+            .where(IntegrationStreamActivationModel.integration_id == model.id)
+            .values(
+                enabled=False,
+                active=False,
+            )
+        )
+        await self._set_connection_enabled(model, False)
+        self._audit(
+            "integration.enabled" if enabled else "integration.disabled",
+            model,
+            actor,
+            "Integration enabled" if enabled else "Integration disabled",
+        )
+        await self.session.commit()
+        return self._response(model)
+
+    async def _set_connection_enabled(
+        self, model: ConnectorIntegrationModel, enabled: bool
+    ) -> None:
+        """Synchronize runtime connection state without deleting configuration or cache."""
         model.enabled = enabled
         if model.integration_type == "zammad" and model.legacy_zammad_configuration_id:
             legacy = await self.session.get(
@@ -302,25 +637,25 @@ class IntegrationService:
             )
             if configuration is not None:
                 configuration.enabled = enabled
-            if not enabled:
-                for cache_model in (
-                    ServiceNowCIModel,
-                    ServiceNowRelationshipModel,
-                    ServiceNowRecordModel,
-                ):
-                    await self.session.execute(
-                        update(cache_model)
-                        .where(cache_model.integration_id == model.id)
-                        .values(cache_status="inactive")
-                    )
-        self._audit(
-            "integration.enabled" if enabled else "integration.disabled",
-            model,
-            actor,
-            "Integration enabled" if enabled else "Integration disabled",
-        )
-        await self.session.commit()
-        return self._response(model)
+        legacy_id = model.configuration_json.get("legacy_id")
+        if legacy_id and model.integration_type in {"prometheus", "loki", "documents"}:
+            try:
+                source_id = UUID(str(legacy_id))
+            except ValueError:
+                source_id = None
+            if source_id is not None:
+                if model.integration_type == "prometheus":
+                    prometheus = await self.session.get(PrometheusConfigurationModel, source_id)
+                    if prometheus is not None:
+                        prometheus.enabled = enabled
+                elif model.integration_type == "loki":
+                    loki = await self.session.get(LokiConfigurationModel, source_id)
+                    if loki is not None:
+                        loki.enabled = enabled
+                else:
+                    document_source = await self.session.get(SourceModel, source_id)
+                    if document_source is not None:
+                        document_source.enabled = enabled
 
     async def mark_test_result(
         self, integration_id: UUID, success: bool, error: str | None = None

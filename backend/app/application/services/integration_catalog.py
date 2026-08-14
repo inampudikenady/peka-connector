@@ -24,7 +24,7 @@ INTEGRATION_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "integration_type": "zammad",
         "name": "Zammad",
-        "category": "ITSM",
+        "category": "Ticketing",
         "provider_roles": ["ticketing"],
         "capabilities": {"tickets": True},
         "available": True,
@@ -33,7 +33,7 @@ INTEGRATION_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "integration_type": "servicenow",
         "name": "ServiceNow",
-        "category": "ITSM",
+        "category": "Ticketing / CMDB",
         "provider_roles": ["ticketing", "cmdb"],
         "capabilities": {
             "incidents": True,
@@ -108,8 +108,8 @@ INTEGRATION_CATALOG: tuple[dict[str, Any], ...] = (
     },
     {
         "integration_type": "generic_cmdb",
-        "name": "Generic CMDB",
-        "category": "Inventory / CMDB",
+        "name": "Local CMDB",
+        "category": "CMDB",
         "provider_roles": ["cmdb"],
         "capabilities": {"inventory": True},
         "available": True,
@@ -127,6 +127,20 @@ INTEGRATION_CATALOG: tuple[dict[str, Any], ...] = (
 )
 
 CATALOG_BY_TYPE = {item["integration_type"]: item for item in INTEGRATION_CATALOG}
+
+STREAMS: tuple[str, ...] = ("monitoring", "logs", "ticketing", "cmdb", "knowledge")
+
+STREAM_SOURCES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "prometheus": (("monitoring", "prometheus", "Prometheus"),),
+    "loki": (("logs", "loki", "Loki"),),
+    "zammad": (("ticketing", "zammad", "Zammad"),),
+    "servicenow": (
+        ("ticketing", "servicenow", "ServiceNow"),
+        ("cmdb", "servicenow_cmdb", "ServiceNow CMDB"),
+    ),
+    "generic_cmdb": (("cmdb", "local_cmdb", "Local CMDB"),),
+    "documents": (("knowledge", "documents", "Documents"),),
+}
 
 ROLE_CAPABILITIES: dict[str, dict[str, set[str]]] = {
     "ticketing": {

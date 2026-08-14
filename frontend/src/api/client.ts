@@ -4,8 +4,8 @@ import type {
   DocumentUploadBatch, ManagedDocumentScan, ManagedDocumentSource, PaginatedLogs, PaginatedManagedDocuments, PaginatedScans, ProductSettings, ScanDetail, ScanRecord, SetupStatus, Source, SourceInput,
   CMDBDataset, CMDBImportMode, CMDBUpload, PaginatedCMDBRecords, PrometheusConfiguration, PaginatedInventory, InventoryDetail,
   LokiConfiguration, PrometheusDiagnostics, TrustedCertificateAuthority, ZammadConfiguration,
-  ConnectorIntegration, IntegrationCatalogItem,
-  ServiceNowConfiguration,
+  ConnectorIntegration, IntegrationCatalogItem, IntegrationStream,
+  ServiceNowConfiguration, ServiceNowCMDBObservability,
 } from './types';
 
 let accessToken: string | null = null;
@@ -32,7 +32,10 @@ async function parseError(response: Response): Promise<ApiError> {
   if (Array.isArray(body.detail)) {
     message = body.detail.map((item) => (item as { msg?: string }).msg ?? 'Invalid value').join('. ');
   }
-  const code = typeof body.code === 'string' ? body.code : undefined;
+  const nested = body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)
+    ? body.detail as { code?: unknown } : undefined;
+  const code = typeof body.code === 'string' ? body.code
+    : typeof nested?.code === 'string' ? nested.code : undefined;
   return new ApiError(message, response.status, code);
 }
 
@@ -199,17 +202,20 @@ export const api = {
   testZammad: (id: string): Promise<{ message: string; readable_ticket_count: number }> => request(`/zammad/configurations/${id}/test`, { method: 'POST' }),
   syncZammad: (id: string): Promise<{ ticket_count: number; article_count: number; duration_seconds: number }> => request(`/zammad/configurations/${id}/sync`, { method: 'POST' }),
   serviceNowConfigurations: (): Promise<ServiceNowConfiguration[]> => request('/servicenow/configurations'),
+  serviceNowCMDB: (id: string, page = 1): Promise<ServiceNowCMDBObservability> => request(`/servicenow/configurations/${id}/cmdb?page=${page}&page_size=25`),
   createServiceNowConfiguration: (body: object): Promise<ServiceNowConfiguration> => request('/servicenow/configurations', { method: 'POST', body: JSON.stringify(body) }),
   updateServiceNowConfiguration: (id: string, body: object): Promise<ServiceNowConfiguration> => request(`/servicenow/configurations/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   testServiceNow: (id: string): Promise<{ message: string; readable_configuration_item_count: number }> => request(`/servicenow/configurations/${id}/test`, { method: 'POST' }),
   syncServiceNow: (id: string): Promise<{ counts: Record<string, number>; stage_errors: Record<string, string> }> => request(`/servicenow/configurations/${id}/sync`, { method: 'POST' }),
   integrationCatalog: (): Promise<IntegrationCatalogItem[]> => request('/integrations/catalog'),
   integrations: (): Promise<ConnectorIntegration[]> => request('/integrations'),
+  integrationStreams: (): Promise<IntegrationStream[]> => request('/integrations/streams'),
   integration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}`),
   createIntegration: (body: object): Promise<ConnectorIntegration> => request('/integrations', { method: 'POST', body: JSON.stringify(body) }),
   updateIntegration: (id: string, body: object): Promise<ConnectorIntegration> => request(`/integrations/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   testIntegration: (id: string): Promise<Record<string, unknown>> => request(`/integrations/${id}/test`, { method: 'POST' }),
   enableIntegration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}/enable`, { method: 'POST' }),
+  selectIntegrationSource: (id: string, stream: string, confirmed = false): Promise<{ stream: string; selected_source: string }> => request(`/integrations/${id}/streams/${stream}/select`, { method: 'POST', body: JSON.stringify({ confirmed }) }),
   disableIntegration: (id: string): Promise<ConnectorIntegration> => request(`/integrations/${id}/disable`, { method: 'POST' }),
   syncIntegration: (id: string): Promise<Record<string, unknown>> => request(`/integrations/${id}/sync`, { method: 'POST' }),
   inventory: (query: string): Promise<PaginatedInventory> => request(`/inventory?${query}`),

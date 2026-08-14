@@ -70,8 +70,22 @@ export interface ServiceNowConfiguration {
   sync_interval_seconds: number; connection_state: string; connected: boolean;
   last_test_at: string | null; last_successful_test_at: string | null;
   last_successful_sync_at: string | null; last_sync_error: string | null;
+  last_attempted_sync_at: string | null;
   next_scheduled_sync_at: string | null; counts: Record<string, number>;
-  availability: { enabled: boolean; state: string; cache_timestamp: string | null; stale: boolean; last_error: string | null };
+  availability: { enabled: boolean; state: string; cache_timestamp: string | null; stale: boolean; freshness_state: 'fresh' | 'stale' | 'error'; freshness_threshold_seconds: number; last_error: string | null };
+}
+export interface ServiceNowCMDBObservability {
+  source: 'ServiceNow CMDB'; active: boolean; connection_state: string; sync_state: string;
+  last_successful_sync_at: string | null; last_attempted_sync_at: string | null;
+  stale: boolean; freshness_state: 'fresh' | 'stale' | 'error';
+  freshness_threshold_seconds: number; cache_timestamp: string | null;
+  total_cis: number; server_cis: number;
+  other_cis: number; relationship_count: number; last_error: string | null;
+  items: Array<{ id: string; ci_name: string; ci_class: string; fqdn: string | null;
+    ip_address: string | null; operating_system: string | null; environment: string | null;
+    application: string | null; business_owner: string | null; support_group: string | null;
+    lifecycle_state: string | null; updated_at: string; source: string }>;
+  total: number; page: number; page_size: number;
 }
 export interface IntegrationCatalogItem {
   integration_type: string; name: string; category: string; provider_roles: string[];
@@ -85,6 +99,15 @@ export interface ConnectorIntegration {
   last_successful_test_at: string | null; last_successful_sync_at: string | null;
   initial_sync_status: string; last_error: string | null;
   created_at: string; updated_at: string;
+}
+export interface IntegrationStreamSource {
+  activation_id: string; integration_id: string; source_key: string; source_name: string;
+  configured: boolean; selected: boolean; status: string;
+  last_successful_sync_at: string | null; last_error: string | null;
+}
+export interface IntegrationStream {
+  stream: 'monitoring' | 'logs' | 'ticketing' | 'cmdb' | 'knowledge';
+  display_name: string; selected_source: string | null; sources: IntegrationStreamSource[];
 }
 export interface TrustedCertificateAuthority {
   id: string; name: string; original_filename: string; fingerprint_sha256: string;
